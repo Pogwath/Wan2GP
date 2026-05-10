@@ -42,7 +42,7 @@ from shared.utils import notification_sound
 from shared.utils.loras_mutipliers import preparse_loras_multipliers, parse_loras_multipliers
 from shared.utils.utils import convert_tensor_to_image, save_image, get_video_info, get_file_creation_date, convert_image_to_video, calculate_new_dimensions, convert_image_to_tensor, calculate_dimensions_and_resize_image, rescale_and_crop, get_video_frame, resize_and_remove_background, rgb_bw_to_rgba_mask, to_rgb_tensor, get_resampled_video_transparent, get_video_summary_extras
 from shared.utils.utils import calculate_new_dimensions, get_outpainting_dims, get_outpainting_frame_location, get_outpainting_full_area_dimensions, resolve_outpainting_dims
-from shared.utils.utils import has_video_file_extension, has_image_file_extension, has_audio_file_extension
+from shared.utils.utils import has_video_file_extension, has_image_file_extension, has_audio_file_extension, compute_sliding_window_no
 from shared.utils.audio_video import extract_audio_tracks, combine_video_with_audio_tracks, combine_and_concatenate_video_with_audio_tracks, cleanup_temp_audio_files, normalize_audio_pair_volumes_to_temp_files, save_video, save_hdr_video, save_image
 from shared.utils.audio_video import append_sliding_window_audio, read_image_metadata, extract_audio_track_to_wav, write_wav_file, save_audio_file, get_audio_codec_extension, create_silent_wav_file
 from shared.utils.audio_metadata import read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
@@ -305,10 +305,6 @@ def is_integer(n):
 def get_state_model_type(state):
     key= "model_type" if state.get("active_form", "add") == "add" else "edit_model_type"
     return state[key]
-
-def compute_sliding_window_no(current_video_length, sliding_window_size, discard_last_frames, reuse_frames):
-    left_after_first_window = current_video_length - sliding_window_size + discard_last_frames
-    return 1 + math.ceil(left_after_first_window / (sliding_window_size - discard_last_frames - reuse_frames))
 
 def clean_image_list(gradio_list):
     if not isinstance(gradio_list, list): gradio_list = [gradio_list]
