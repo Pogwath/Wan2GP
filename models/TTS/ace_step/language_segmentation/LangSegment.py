@@ -451,6 +451,8 @@ class LangSegment:
         return data
 
     def _addwords(self, words, language, text, score, symbol=None):
+        if score is not None:
+            score = np.float32(score)
         if text == "\n":
             pass  # Keep Line Breaks
         elif text is None or len(text.strip()) == 0:
@@ -515,7 +517,7 @@ class LangSegment:
 
     def _mean_processing(self, text: str):
         if text is None or (text.strip()) == "":
-            return None, 0.0
+            return None, np.float32(0.0)
         arrs = self._split_camel_case(text).split(" ")
         langs = []
         for t in arrs:
@@ -524,19 +526,15 @@ class LangSegment:
             language, score = self.langid.classify(t)
             langs.append({"lang": language})
         if len(langs) == 0:
-            return None, 0.0
-        return Counter([item["lang"] for item in langs]).most_common(1)[0][0], 1.0
+            return None, np.float32(0.0)
+        return Counter([item["lang"] for item in langs]).most_common(1)[0][0], np.float32(1.0)
 
     def _lang_classify(self, cleans_text):
         language, score = self.langid.classify(cleans_text)
         # fix: Huggingface is np.float32
-        if (
-            score is not None
-            and isinstance(score, np.generic)
-            and hasattr(score, "item")
-        ):
-            score = score.item()
-        score = round(score, 3)
+        if score is not None:
+            score = np.float32(score)
+            score = np.round(score, 3)
         return language, score
 
     def _get_filters_string(self):
