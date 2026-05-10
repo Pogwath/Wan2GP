@@ -688,8 +688,6 @@ class QwenImageTransformer2DModel(nn.Module):
         joint_attention_dim (`int`, defaults to `3584`):
             The number of dimensions to use for the joint attention (embedding/channel dimension of
             `encoder_hidden_states`).
-        guidance_embeds (`bool`, defaults to `False`):
-            Whether to use guidance embeddings for guidance-distilled variant of the model.
         axes_dims_rope (`Tuple[int]`, defaults to `(16, 56, 56)`):
             The dimensions to use for the rotary positional embeddings.
     """
@@ -753,7 +751,6 @@ class QwenImageTransformer2DModel(nn.Module):
         attention_head_dim: int = 128,
         num_attention_heads: int = 24,
         joint_attention_dim: int = 3584,
-        guidance_embeds: bool = False,  # TODO: this should probably be removed
         axes_dims_rope: Tuple[int, int, int] = (16, 56, 56),
         zero_cond_t: bool = False,
         use_additional_t_cond: bool = False,
@@ -763,7 +760,6 @@ class QwenImageTransformer2DModel(nn.Module):
         self.out_channels = out_channels or in_channels
         self.inner_dim = num_attention_heads * attention_head_dim
         self.in_channels = in_channels
-        self.guidance_embeds = guidance_embeds
         if use_layer3d_rope:
             self.pos_embed = QwenEmbedLayer3DRope(theta=10000, axes_dim=list(axes_dims_rope), scale_rope=True)
         else:
