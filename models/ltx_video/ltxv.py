@@ -558,7 +558,7 @@ def get_media_num_frames(media_path: str) -> int:
         return media_path.shape[1]
     elif isinstance(media_path, str) and any( media_path.lower().endswith(ext) for ext in [".mp4", ".avi", ".mov", ".mkv"]):
         reader = imageio.get_reader(media_path)
-        return min(reader.count_frames(), 0) # to do
+        return reader.count_frames()
     else:
         raise Exception("video format not supported")
 
