@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 import shutil
 import tarfile
 import tempfile
@@ -16,6 +17,7 @@ __all__ = ["download_ffmpeg"]
 
 def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = None):
     """Ensure ffmpeg/ffprobe binaries (and their shared libs) are downloaded and on PATH."""
+    logger = logging.getLogger(__name__)
     required_binaries = ["ffmpeg", "ffprobe"]
     if os.name == "nt":
         required_binaries.append("ffplay")
@@ -27,6 +29,8 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
         bin_dir = Path(bin_directory)
 
     bin_dir.mkdir(parents=True, exist_ok=True)
+    archives_dir = bin_dir / "archives"
+    archives_dir.mkdir(parents=True, exist_ok=True)
     repo_root = bin_dir.parent
 
     def _candidate_name(name: str) -> str:
@@ -52,7 +56,7 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
                     break
                 idx += 1
         shutil.move(str(root_ffmpeg), str(target_path))
-        print(
+        logger.info(
             f"[FFmpeg] Quarantined root binary: {root_ffmpeg} -> {target_path}. "
             "Reason: ffmpeg.exe in the project root can be picked from CWD and break TorchCodec DLL loading on Windows. Quarantined file can be deleted if unused."
         )
@@ -140,20 +144,37 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
         return
 
     def _download_file(url: str, destination: Path):
-        with requests.get(url, stream=True, timeout=120) as response:
-            response.raise_for_status()
-            total = int(response.headers.get("Content-Length", 0))
-            with open(destination, "wb") as file_handle, tqdm(
-                total=total if total else None,
-                unit="B",
-                unit_scale=True,
-                desc=f"Downloading {destination.name}"
-            ) as progress:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if not chunk:
-                        continue
-                    file_handle.write(chunk)
-                    progress.update(len(chunk))
+        if destination.exists() and destination.stat().st_size > 0:
+            logger.info(f"[FFmpeg] Using cached archive: {destination}")
+            return
+
+        temp_destination = destination.with_suffix(destination.suffix + ".tmp")
+        try:
+            with requests.get(url, stream=True, timeout=120) as response:
+                response.raise_for_status()
+                total = int(response.headers.get("Content-Length", 0))
+                with open(temp_destination, "wb") as file_handle, tqdm(
+                    total=total if total else None,
+                    unit="B",
+                    unit_scale=True,
+                    desc=f"Downloading {destination.name}"
+                ) as progress:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if not chunk:
+                            continue
+                        file_handle.write(chunk)
+                        progress.update(len(chunk))
+
+            # Verify download size if possible
+            if total > 0 and temp_destination.stat().st_size != total:
+                raise RuntimeError(f"Download size mismatch for {url}. Expected {total}, got {temp_destination.stat().st_size}")
+
+            # Atomic swap
+            temp_destination.replace(destination)
+        except Exception:
+            if temp_destination.exists():
+                temp_destination.unlink()
+            raise
 
     def _download_windows_build():
         exes = [_candidate_name(name) for name in required_binaries]
@@ -164,7 +185,7 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
         zip_asset = next((asset for asset in assets if asset.get("name", "").endswith("essentials_build.zip")), None)
         if not zip_asset:
             raise RuntimeError("Unable to locate FFmpeg essentials build for Windows.")
-        zip_path = bin_dir / zip_asset["name"]
+        zip_path = archives_dir / zip_asset["name"]
         _download_file(zip_asset["browser_download_url"], zip_path)
 
         try:
@@ -181,11 +202,7 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
                         shutil.copyfileobj(source, target)
                     destination.chmod(0o755)
         finally:
-            try:
-                zip_path.unlink(missing_ok=True)
-            except TypeError:
-                if zip_path.exists():
-                    zip_path.unlink()
+            pass
 
     def _download_posix_build():
         api_url = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
@@ -209,7 +226,7 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
         if not tar_asset:
             raise RuntimeError("Unable to locate a suitable FFmpeg build for this platform.")
 
-        tar_path = bin_dir / tar_asset["name"]
+        tar_path = archives_dir / tar_asset["name"]
         _download_file(tar_asset["browser_download_url"], tar_path)
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
@@ -243,11 +260,7 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
                         shutil.copy2(lib_file, destination)
                         destination.chmod(0o755)
         finally:
-            try:
-                tar_path.unlink(missing_ok=True)
-            except TypeError:
-                if tar_path.exists():
-                    tar_path.unlink()
+            pass
 
     try:
         if os.name == "nt":
@@ -255,16 +268,16 @@ def download_ffmpeg(bin_directory: typing.Optional[typing.Union[str, Path]] = No
         else:
             _download_posix_build()
     except Exception as exc:
-        print(f"Failed to download FFmpeg binaries automatically: {exc}")
+        logger.error(f"Failed to download FFmpeg binaries automatically: {exc}")
         return
 
     if os.name == "nt":
         if not all(_local_binary_exists(binary) for binary in required_binaries):
-            print("FFmpeg binaries are still missing after download; please install them manually.")
+            logger.error("FFmpeg binaries are still missing after download; please install them manually.")
             return
     else:
         if not all(_binary_exists(binary) for binary in required_binaries):
-            print("FFmpeg binaries are still missing after download; please install them manually.")
+            logger.error("FFmpeg binaries are still missing after download; please install them manually.")
             return
 
     _ensure_bin_dir_on_path()
