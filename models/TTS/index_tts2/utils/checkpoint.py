@@ -38,5 +38,5 @@ def load_checkpoint(model: torch.nn.Module, model_pth: str) -> dict:
     configs = {}
     if os.path.exists(info_path):
         with open(info_path, 'r') as fin:
-            configs = yaml.load(fin, Loader=yaml.FullLoader)
+            configs = yaml.safe_load(fin)
     return configs
