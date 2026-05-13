@@ -72,6 +72,10 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._compiled_term_patterns = dict()
+
+        self.zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+        self.char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -162,8 +166,7 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self.zh_char_rep_pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
                 text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
@@ -178,8 +181,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self.char_rep_pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -288,10 +290,11 @@ class TextNormalizer:
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
         transformed_text = text
+
+        if not hasattr(self, '_compiled_term_patterns'):
+            self._compiled_term_patterns = dict()
+
         for term in sorted_terms:
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
@@ -299,7 +302,9 @@ class TextNormalizer:
             else:
                 replacement = term_value
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            if term not in self._compiled_term_patterns:
+                self._compiled_term_patterns[term] = re.compile(re.escape(term), re.IGNORECASE)
+            pattern = self._compiled_term_patterns[term]
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
