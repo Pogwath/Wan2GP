@@ -73,10 +73,18 @@ class TextNormalizer:
         # }
         self.term_glossary = dict()
 
-    def match_email(self, email):
-        # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
-        pattern = r"^[a-zA-Z0-9]+@[a-zA-Z0-9]+\.[a-zA-Z]+$"
-        return re.match(pattern, email) is not None
+        # Pre-compile regex patterns for performance optimization
+        self.email_pattern_compiled = re.compile(r"^[a-zA-Z0-9]+@[a-zA-Z0-9]+\.[a-zA-Z]+$")
+        self.pinyin_tone_pattern_compiled = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
+        self.name_pattern_compiled = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
+        self.tech_term_pattern_compiled = re.compile(TextNormalizer.TECH_TERM_PATTERN)
+        self.english_contraction_pattern_compiled = re.compile(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, re.IGNORECASE)
+        self.correct_pinyin_pattern_compiled = re.compile(r"([jqx])[uü](n|e|an)*(\d)", re.IGNORECASE)
+        self.chinese_char_pattern_compiled = re.compile(r"[\u4e00-\u9fff]")
+        self.alpha_char_pattern_compiled = re.compile(r"[a-zA-Z]")
+        self.restore_tech_terms_pattern_compiled = re.compile(r'\s*<H>\s*')
+        self.zh_char_rep_pattern_compiled = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+        self.char_rep_pattern_compiled = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
 
     PINYIN_TONE_PATTERN = r"(?<![a-z])((?:[bpmfdtnlgkhjqxzcsryw]|[zcs]h)?(?:[aeiouüv]|[ae]i|u[aio]|ao|ou|i[aue]|[uüv]e|[uvü]ang?|uai|[aeiuv]n|[aeio]ng|ia[no]|i[ao]ng)|ng|er)([1-5])"
     """
@@ -101,15 +109,18 @@ class TextNormalizer:
     # 匹配常见英语缩写 's，仅用于替换为 is，不匹配所有 's
     ENGLISH_CONTRACTION_PATTERN = r"(what|where|who|which|how|t?here|it|s?he|that|this)'s"
 
+    def match_email(self, email):
+        # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
+        return self.email_pattern_compiled.match(email) is not None
 
     def use_chinese(self, s):
-        has_chinese = bool(re.search(r"[\u4e00-\u9fff]", s))
-        has_alpha = bool(re.search(r"[a-zA-Z]", s))
+        has_chinese = bool(self.chinese_char_pattern_compiled.search(s))
+        has_alpha = bool(self.alpha_char_pattern_compiled.search(s))
         is_email = self.match_email(s)
         if has_chinese or not has_alpha or is_email:
             return True
 
-        has_pinyin = bool(re.search(TextNormalizer.PINYIN_TONE_PATTERN, s, re.IGNORECASE))
+        has_pinyin = bool(self.pinyin_tone_pattern_compiled.search(s))
         return has_pinyin
 
     def load(self):
@@ -142,7 +153,7 @@ class TextNormalizer:
             print("Error, text normalizer is not initialized !!!")
             return ""
         if self.use_chinese(text):
-            text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+            text = self.english_contraction_pattern_compiled.sub(r"\1 is", text)
             # 应用术语词汇表（优先级最高，在所有保护之前）
             if self.enable_glossary:
                 text = self.apply_glossary_terms(text, lang="zh")
@@ -162,11 +173,10 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self.zh_char_rep_pattern_compiled.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
-                text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+                text = self.english_contraction_pattern_compiled.sub(r"\1 is", text)
                 # 应用术语词汇表（优先级最高，在所有保护之前）
                 if self.enable_glossary:
                     text = self.apply_glossary_terms(text, lang="en")
@@ -178,8 +188,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self.char_rep_pattern_compiled.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -190,9 +199,8 @@ class TextNormalizer:
         if pinyin[0] not in "jqxJQX":
             return pinyin
         # 匹配 jqx 的韵母为 u/ü 的拼音
-        pattern = r"([jqx])[uü](n|e|an)*(\d)"
         repl = r"\g<1>v\g<2>\g<3>"
-        pinyin = re.sub(pattern, repl, pinyin, flags=re.IGNORECASE)
+        pinyin = self.correct_pinyin_pattern_compiled.sub(repl, pinyin)
         return pinyin.upper()
 
     def save_names(self, original_text):
@@ -201,8 +209,7 @@ class TextNormalizer:
         例如：克里斯托弗·诺兰 -> <n_a>
         """
         # 人名
-        name_pattern = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
-        original_name_list = re.findall(name_pattern, original_text)
+        original_name_list = self.name_pattern_compiled.findall(original_text)
         if len(original_name_list) == 0:
             return (original_text, None)
         original_name_list = list(set("".join(n) for n in original_name_list))
@@ -236,8 +243,7 @@ class TextNormalizer:
         例如：GPT-5-nano -> GPT<H>5<H>nano，然后 5 被转换为 五
         最终恢复为：GPT-五-nano
         """
-        tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
-        original_tech_list = tech_pattern.findall(original_text)
+        original_tech_list = self.tech_term_pattern_compiled.findall(original_text)
         if len(original_tech_list) == 0:
             return (original_text, None)
 
@@ -264,7 +270,7 @@ class TextNormalizer:
 
         # 清理 <H> 周围可能的空格，然后恢复为连字符
         # 处理模式: " <H> " -> "-", " <H>" -> "-", "<H> " -> "-", "<H>" -> "-"
-        transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
+        transformed_text = self.restore_tech_terms_pattern_compiled.sub('-', normalized_text)
         return transformed_text
 
     def apply_glossary_terms(self, text, lang="zh"):
@@ -362,8 +368,7 @@ class TextNormalizer:
         例如：xuan4 -> <pinyin_a>
         """
         # 声母韵母+声调数字
-        origin_pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
-        original_pinyin_list = re.findall(origin_pinyin_pattern, original_text)
+        original_pinyin_list = self.pinyin_tone_pattern_compiled.findall(original_text)
         if len(original_pinyin_list) == 0:
             return (original_text, None)
         original_pinyin_list = list(set("".join(p) for p in original_pinyin_list))
