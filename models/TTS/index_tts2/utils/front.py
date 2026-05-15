@@ -72,6 +72,15 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._compiled_glossary_patterns = {}
+        self._sorted_glossary_terms = []
+
+    def _compile_glossary_patterns(self):
+        """Compile regex patterns for terms in the glossary for optimized replacement."""
+        self._sorted_glossary_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+        self._compiled_glossary_patterns = {
+            term: re.compile(re.escape(term), re.IGNORECASE) for term in self._sorted_glossary_terms
+        }
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -285,21 +294,19 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        # Recompile patterns if the glossary has been modified
+        if len(self._sorted_glossary_terms) != len(self.term_glossary):
+            self._compile_glossary_patterns()
+
         transformed_text = text
-        for term in sorted_terms:
+        for term in self._sorted_glossary_terms:
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
                 replacement = term_value.get(lang, term_value.get(lang, term))
             else:
                 replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            # 使用预编译的正则进行大小写不敏感的替换
+            pattern = self._compiled_glossary_patterns[term]
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
