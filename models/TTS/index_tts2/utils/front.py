@@ -8,6 +8,10 @@ import warnings
 from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
+@lru_cache(maxsize=128)
+def _get_term_pattern(term: str):
+    return re.compile(re.escape(term), re.IGNORECASE)
+
 
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
@@ -73,6 +77,10 @@ class TextNormalizer:
         # }
         self.term_glossary = dict()
 
+        # Pre-compile character replacement maps
+        self.zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+        self.en_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
         pattern = r"^[a-zA-Z0-9]+@[a-zA-Z0-9]+\.[a-zA-Z]+$"
@@ -101,6 +109,12 @@ class TextNormalizer:
     # 匹配常见英语缩写 's，仅用于替换为 is，不匹配所有 's
     ENGLISH_CONTRACTION_PATTERN = r"(what|where|who|which|how|t?here|it|s?he|that|this)'s"
 
+    # Pre-compile regex patterns for performance
+    _PINYIN_TONE_RE = re.compile(PINYIN_TONE_PATTERN, re.IGNORECASE)
+    _NAME_RE = re.compile(NAME_PATTERN, re.IGNORECASE)
+    _TECH_TERM_RE = re.compile(TECH_TERM_PATTERN)
+    _ENGLISH_CONTRACTION_RE = re.compile(ENGLISH_CONTRACTION_PATTERN, re.IGNORECASE)
+
 
     def use_chinese(self, s):
         has_chinese = bool(re.search(r"[\u4e00-\u9fff]", s))
@@ -109,7 +123,7 @@ class TextNormalizer:
         if has_chinese or not has_alpha or is_email:
             return True
 
-        has_pinyin = bool(re.search(TextNormalizer.PINYIN_TONE_PATTERN, s, re.IGNORECASE))
+        has_pinyin = bool(self._PINYIN_TONE_RE.search(s))
         return has_pinyin
 
     def load(self):
@@ -142,7 +156,7 @@ class TextNormalizer:
             print("Error, text normalizer is not initialized !!!")
             return ""
         if self.use_chinese(text):
-            text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+            text = self._ENGLISH_CONTRACTION_RE.sub(r"\1 is", text)
             # 应用术语词汇表（优先级最高，在所有保护之前）
             if self.enable_glossary:
                 text = self.apply_glossary_terms(text, lang="zh")
@@ -162,11 +176,10 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self.zh_char_rep_pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
-                text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+                text = self._ENGLISH_CONTRACTION_RE.sub(r"\1 is", text)
                 # 应用术语词汇表（优先级最高，在所有保护之前）
                 if self.enable_glossary:
                     text = self.apply_glossary_terms(text, lang="en")
@@ -178,8 +191,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self.en_char_rep_pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -201,8 +213,7 @@ class TextNormalizer:
         例如：克里斯托弗·诺兰 -> <n_a>
         """
         # 人名
-        name_pattern = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
-        original_name_list = re.findall(name_pattern, original_text)
+        original_name_list = self._NAME_RE.findall(original_text)
         if len(original_name_list) == 0:
             return (original_text, None)
         original_name_list = list(set("".join(n) for n in original_name_list))
@@ -236,8 +247,7 @@ class TextNormalizer:
         例如：GPT-5-nano -> GPT<H>5<H>nano，然后 5 被转换为 五
         最终恢复为：GPT-五-nano
         """
-        tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
-        original_tech_list = tech_pattern.findall(original_text)
+        original_tech_list = self._TECH_TERM_RE.findall(original_text)
         if len(original_tech_list) == 0:
             return (original_text, None)
 
@@ -288,9 +298,6 @@ class TextNormalizer:
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
         transformed_text = text
         for term in sorted_terms:
             term_value = self.term_glossary[term]
@@ -299,7 +306,7 @@ class TextNormalizer:
             else:
                 replacement = term_value
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            pattern = _get_term_pattern(term)
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
@@ -362,8 +369,7 @@ class TextNormalizer:
         例如：xuan4 -> <pinyin_a>
         """
         # 声母韵母+声调数字
-        origin_pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
-        original_pinyin_list = re.findall(origin_pinyin_pattern, original_text)
+        original_pinyin_list = self._PINYIN_TONE_RE.findall(original_text)
         if len(original_pinyin_list) == 0:
             return (original_text, None)
         original_pinyin_list = list(set("".join(p) for p in original_pinyin_list))
@@ -681,12 +687,12 @@ if __name__ == "__main__":
     # 测试拼音 (8474-10201)
     for id in range(8474, 10201):
         pinyin = tokenizer.convert_ids_to_tokens(id)
-        if re.match(TextNormalizer.PINYIN_TONE_PATTERN, pinyin, re.IGNORECASE) is None:
+        if TextNormalizer._PINYIN_TONE_RE.match(pinyin) is None:
             print(f"{pinyin} should be matched")
     for badcase in [
         "beta1", "better1", "voice2", "bala2", "babala2", "hunger2"
     ]:
-        if re.match(TextNormalizer.PINYIN_TONE_PATTERN, badcase, re.IGNORECASE) is not None:
+        if TextNormalizer._PINYIN_TONE_RE.match(badcase) is not None:
             print(f"{badcase} should not be matched!")
     # 不应该有 unk_token_id
     for t in set([*TextTokenizer.punctuation_marks_tokens, ",", "▁,", "-", "▁..."]):
