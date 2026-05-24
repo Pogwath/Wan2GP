@@ -9,6 +9,10 @@ from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
 
+@lru_cache(maxsize=42)
+def _get_term_pattern(term: str):
+    return re.compile(re.escape(term), re.IGNORECASE)
+
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
@@ -54,6 +58,11 @@ class TextNormalizer:
             "$": ".",
             **self.char_rep_map,
         }
+
+        # Pre-compile character replacement patterns
+        self._char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+        self._zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+
         self.enable_glossary = enable_glossary
         # 术语词汇表：用户可自定义专业术语的读法
         # 格式: {"原始术语": {"en": "英文读法", "zh": "中文读法"}}
@@ -97,6 +106,11 @@ class TextNormalizer:
     必须以字母开头，避免匹配纯数字（如电话号码 135-4567-8900）
     用于保护连字符结构，防止中文normalizer将连字符解析为减号（如"负五减"）
     """
+
+    # Pre-compiled regular expressions for performance
+    _NAME_PATTERN_COMPILED = re.compile(NAME_PATTERN, re.IGNORECASE)
+    _TECH_TERM_PATTERN_COMPILED = re.compile(TECH_TERM_PATTERN)
+    _PINYIN_TONE_PATTERN_COMPILED = re.compile(PINYIN_TONE_PATTERN, re.IGNORECASE)
 
     # 匹配常见英语缩写 's，仅用于替换为 is，不匹配所有 's
     ENGLISH_CONTRACTION_PATTERN = r"(what|where|who|which|how|t?here|it|s?he|that|this)'s"
@@ -162,8 +176,7 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self._zh_char_rep_pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
                 text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
@@ -178,8 +191,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self._char_rep_pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -201,8 +213,7 @@ class TextNormalizer:
         例如：克里斯托弗·诺兰 -> <n_a>
         """
         # 人名
-        name_pattern = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
-        original_name_list = re.findall(name_pattern, original_text)
+        original_name_list = re.findall(TextNormalizer._NAME_PATTERN_COMPILED, original_text)
         if len(original_name_list) == 0:
             return (original_text, None)
         original_name_list = list(set("".join(n) for n in original_name_list))
@@ -236,8 +247,7 @@ class TextNormalizer:
         例如：GPT-5-nano -> GPT<H>5<H>nano，然后 5 被转换为 五
         最终恢复为：GPT-五-nano
         """
-        tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
-        original_tech_list = tech_pattern.findall(original_text)
+        original_tech_list = TextNormalizer._TECH_TERM_PATTERN_COMPILED.findall(original_text)
         if len(original_tech_list) == 0:
             return (original_text, None)
 
@@ -288,9 +298,6 @@ class TextNormalizer:
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
         transformed_text = text
         for term in sorted_terms:
             term_value = self.term_glossary[term]
@@ -299,7 +306,7 @@ class TextNormalizer:
             else:
                 replacement = term_value
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            pattern = _get_term_pattern(term)
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
@@ -362,8 +369,7 @@ class TextNormalizer:
         例如：xuan4 -> <pinyin_a>
         """
         # 声母韵母+声调数字
-        origin_pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
-        original_pinyin_list = re.findall(origin_pinyin_pattern, original_text)
+        original_pinyin_list = re.findall(TextNormalizer._PINYIN_TONE_PATTERN_COMPILED, original_text)
         if len(original_pinyin_list) == 0:
             return (original_text, None)
         original_pinyin_list = list(set("".join(p) for p in original_pinyin_list))
