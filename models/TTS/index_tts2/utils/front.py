@@ -8,6 +8,13 @@ import warnings
 from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
+# ⚡ Bolt: Moved _get_term_pattern outside of apply_glossary_terms to prevent
+# the @lru_cache from being recreated on every call. This ensures compiled regex
+# patterns are correctly cached across invocations, significantly reducing overhead.
+@lru_cache(maxsize=1024)
+def _get_term_pattern(term: str):
+    return re.compile(re.escape(term), re.IGNORECASE)
+
 
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
@@ -288,9 +295,6 @@ class TextNormalizer:
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
         transformed_text = text
         for term in sorted_terms:
             term_value = self.term_glossary[term]
@@ -299,7 +303,7 @@ class TextNormalizer:
             else:
                 replacement = term_value
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            pattern = _get_term_pattern(term)
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
