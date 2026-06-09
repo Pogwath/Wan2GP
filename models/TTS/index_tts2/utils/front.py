@@ -9,6 +9,11 @@ from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
 
+@lru_cache(maxsize=2048)
+def _get_term_pattern(term: str):
+    return re.compile(re.escape(term), re.IGNORECASE)
+
+
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
@@ -72,6 +77,16 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._sorted_terms = []
+        self._cached_glossary_len = -1
+        self._glossary_version = None
+
+        # Precompile regular expressions for performance
+        self.zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+        self.char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+        self.name_pattern = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
+        self.tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
+        self.pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -162,8 +177,7 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self.zh_char_rep_pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
                 text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
@@ -178,8 +192,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self.char_rep_pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -201,8 +214,7 @@ class TextNormalizer:
         例如：克里斯托弗·诺兰 -> <n_a>
         """
         # 人名
-        name_pattern = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
-        original_name_list = re.findall(name_pattern, original_text)
+        original_name_list = re.findall(self.name_pattern, original_text)
         if len(original_name_list) == 0:
             return (original_text, None)
         original_name_list = list(set("".join(n) for n in original_name_list))
@@ -236,8 +248,7 @@ class TextNormalizer:
         例如：GPT-5-nano -> GPT<H>5<H>nano，然后 5 被转换为 五
         最终恢复为：GPT-五-nano
         """
-        tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
-        original_tech_list = tech_pattern.findall(original_text)
+        original_tech_list = self.tech_pattern.findall(original_text)
         if len(original_tech_list) == 0:
             return (original_text, None)
 
@@ -287,19 +298,24 @@ class TextNormalizer:
 
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        # 缓存排序结果避免每次重新排序
+        if not hasattr(self, '_glossary_version') or getattr(self, '_glossary_version') != id(self.term_glossary) or len(self.term_glossary) != self._cached_glossary_len:
+            self._sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            self._cached_glossary_len = len(self.term_glossary)
+            self._glossary_version = id(self.term_glossary)
+
         transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
+        for term in self._sorted_terms:
+            # Safely handle keys in case term_glossary is mutated directly without updating id
+            term_value = self.term_glossary.get(term)
+            if term_value is None:
+                continue
             if isinstance(term_value, dict):
                 replacement = term_value.get(lang, term_value.get(lang, term))
             else:
                 replacement = term_value
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            pattern = _get_term_pattern(term)
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
@@ -319,6 +335,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._cached_glossary_len = -1 # invalidate cache
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +359,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._cached_glossary_len = -1 # invalidate cache
                     return True
         return False
 
@@ -362,8 +380,7 @@ class TextNormalizer:
         例如：xuan4 -> <pinyin_a>
         """
         # 声母韵母+声调数字
-        origin_pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
-        original_pinyin_list = re.findall(origin_pinyin_pattern, original_text)
+        original_pinyin_list = re.findall(self.pinyin_pattern, original_text)
         if len(original_pinyin_list) == 0:
             return (original_text, None)
         original_pinyin_list = list(set("".join(p) for p in original_pinyin_list))
