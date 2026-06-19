@@ -55,6 +55,9 @@ class TextNormalizer:
             **self.char_rep_map,
         }
         self.enable_glossary = enable_glossary
+
+        self._char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+        self._zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
         # 术语词汇表：用户可自定义专业术语的读法
         # 格式: {"原始术语": {"en": "英文读法", "zh": "中文读法"}}
         # "M.2": {"en": "M dot two", "zh": "M 二"},
@@ -100,6 +103,7 @@ class TextNormalizer:
 
     # 匹配常见英语缩写 's，仅用于替换为 is，不匹配所有 's
     ENGLISH_CONTRACTION_PATTERN = r"(what|where|who|which|how|t?here|it|s?he|that|this)'s"
+    _ENGLISH_CONTRACTION_PATTERN = re.compile(ENGLISH_CONTRACTION_PATTERN, re.IGNORECASE)
 
 
     def use_chinese(self, s):
@@ -142,7 +146,7 @@ class TextNormalizer:
             print("Error, text normalizer is not initialized !!!")
             return ""
         if self.use_chinese(text):
-            text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+            text = TextNormalizer._ENGLISH_CONTRACTION_PATTERN.sub(r"\1 is", text)
             # 应用术语词汇表（优先级最高，在所有保护之前）
             if self.enable_glossary:
                 text = self.apply_glossary_terms(text, lang="zh")
@@ -162,11 +166,10 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self._zh_char_rep_pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
-                text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+                text = TextNormalizer._ENGLISH_CONTRACTION_PATTERN.sub(r"\1 is", text)
                 # 应用术语词汇表（优先级最高，在所有保护之前）
                 if self.enable_glossary:
                     text = self.apply_glossary_terms(text, lang="en")
@@ -178,8 +181,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self._char_rep_pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
