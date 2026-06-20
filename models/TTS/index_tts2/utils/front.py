@@ -54,6 +54,8 @@ class TextNormalizer:
             "$": ".",
             **self.char_rep_map,
         }
+        self.zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+        self.char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
         self.enable_glossary = enable_glossary
         # 术语词汇表：用户可自定义专业术语的读法
         # 格式: {"原始术语": {"en": "英文读法", "zh": "中文读法"}}
@@ -162,7 +164,7 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+            pattern = self.zh_char_rep_pattern
             result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
@@ -178,7 +180,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+            pattern = self.char_rep_pattern
             result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
@@ -195,14 +197,15 @@ class TextNormalizer:
         pinyin = re.sub(pattern, repl, pinyin, flags=re.IGNORECASE)
         return pinyin.upper()
 
+    _name_pattern = re.compile(NAME_PATTERN, re.IGNORECASE)
+
     def save_names(self, original_text):
         """
         替换人名为占位符 <n_a>、 <n_b>, ...
         例如：克里斯托弗·诺兰 -> <n_a>
         """
         # 人名
-        name_pattern = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
-        original_name_list = re.findall(name_pattern, original_text)
+        original_name_list = re.findall(self._name_pattern, original_text)
         if len(original_name_list) == 0:
             return (original_text, None)
         original_name_list = list(set("".join(n) for n in original_name_list))
@@ -229,6 +232,8 @@ class TextNormalizer:
             transformed_text = transformed_text.replace(f"<n_{number}>", name)
         return transformed_text
 
+    _tech_pattern = re.compile(TECH_TERM_PATTERN)
+
     def save_tech_terms(self, original_text):
         """
         保护技术术语中的连字符，防止被中文normalizer解析为减号
@@ -236,8 +241,7 @@ class TextNormalizer:
         例如：GPT-5-nano -> GPT<H>5<H>nano，然后 5 被转换为 五
         最终恢复为：GPT-五-nano
         """
-        tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
-        original_tech_list = tech_pattern.findall(original_text)
+        original_tech_list = self._tech_pattern.findall(original_text)
         if len(original_tech_list) == 0:
             return (original_text, None)
 
@@ -356,14 +360,15 @@ class TextNormalizer:
         with open(glossary_path, 'w', encoding='utf-8') as f:
             yaml.dump(self.term_glossary, f, allow_unicode=True, default_flow_style=False)
 
+    _pinyin_pattern = re.compile(PINYIN_TONE_PATTERN, re.IGNORECASE)
+
     def save_pinyin_tones(self, original_text):
         """
         替换拼音声调为占位符 <pinyin_a>, <pinyin_b>, ...
         例如：xuan4 -> <pinyin_a>
         """
         # 声母韵母+声调数字
-        origin_pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
-        original_pinyin_list = re.findall(origin_pinyin_pattern, original_text)
+        original_pinyin_list = re.findall(self._pinyin_pattern, original_text)
         if len(original_pinyin_list) == 0:
             return (original_text, None)
         original_pinyin_list = list(set("".join(p) for p in original_pinyin_list))
