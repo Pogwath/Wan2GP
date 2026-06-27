@@ -9,6 +9,14 @@ from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
 
+@lru_cache(maxsize=128)
+def get_term_pattern(term: str):
+    """
+    缓存正则表达式的编译以优化性能。
+    """
+    return re.compile(re.escape(term), re.IGNORECASE)
+
+
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
@@ -54,6 +62,8 @@ class TextNormalizer:
             "$": ".",
             **self.char_rep_map,
         }
+        self.char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+        self.zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
         self.enable_glossary = enable_glossary
         # 术语词汇表：用户可自定义专业术语的读法
         # 格式: {"原始术语": {"en": "英文读法", "zh": "中文读法"}}
@@ -162,8 +172,7 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self.zh_char_rep_pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
                 text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
@@ -178,8 +187,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self.char_rep_pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -288,9 +296,6 @@ class TextNormalizer:
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
         transformed_text = text
         for term in sorted_terms:
             term_value = self.term_glossary[term]
