@@ -13,6 +13,7 @@ class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
         self.en_normalizer = None
+        self._cached_sorted_terms = None
         self.char_rep_map = {
             "：": ",",
             "；": ",",
@@ -267,6 +268,10 @@ class TextNormalizer:
         transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
         return transformed_text
 
+    @lru_cache(maxsize=42)
+    def _get_term_pattern(self, term: str):
+        return re.compile(re.escape(term), re.IGNORECASE)
+
     def apply_glossary_terms(self, text, lang="zh"):
         """
         应用术语词汇表，将专业术语替换为对应语言的读法
@@ -287,19 +292,18 @@ class TextNormalizer:
 
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        if self._cached_sorted_terms is None:
+            self._cached_sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+
         transformed_text = text
-        for term in sorted_terms:
+        for term in self._cached_sorted_terms:
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
                 replacement = term_value.get(lang, term_value.get(lang, term))
             else:
                 replacement = term_value
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            pattern = self._get_term_pattern(term)
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
@@ -319,6 +323,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._cached_sorted_terms = None
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +347,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._cached_sorted_terms = None
                     return True
         return False
 
