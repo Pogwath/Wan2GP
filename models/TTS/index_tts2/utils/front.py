@@ -9,6 +9,10 @@ from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
 
+@lru_cache(maxsize=1024)
+def get_term_pattern(term: str):
+    return re.compile(re.escape(term), re.IGNORECASE)
+
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
@@ -287,10 +291,11 @@ class TextNormalizer:
 
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        if getattr(self, '_cached_sorted_terms', None) is None or getattr(self, '_last_glossary_len', 0) != len(self.term_glossary):
+            self._cached_sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            self._last_glossary_len = len(self.term_glossary)
+        sorted_terms = self._cached_sorted_terms
+
         transformed_text = text
         for term in sorted_terms:
             term_value = self.term_glossary[term]
