@@ -9,7 +9,13 @@ from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
 
+
+@lru_cache(maxsize=128)
+def get_term_pattern(term: str):
+    return re.compile(re.escape(term), re.IGNORECASE)
+
 class TextNormalizer:
+
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
         self.en_normalizer = None
@@ -72,6 +78,7 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._sorted_terms = None
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -287,12 +294,11 @@ class TextNormalizer:
 
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        if self._sorted_terms is None or len(self._sorted_terms) != len(self.term_glossary):
+            self._sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+
         transformed_text = text
-        for term in sorted_terms:
+        for term in self._sorted_terms:
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
                 replacement = term_value.get(lang, term_value.get(lang, term))
@@ -319,6 +325,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._sorted_terms = None
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +349,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._sorted_terms = None
                     return True
         return False
 
