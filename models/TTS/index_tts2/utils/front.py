@@ -72,6 +72,9 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._glossary_pattern = None
+        self._glossary_lower_map = None
+        self._last_glossary_keys = None
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -267,6 +270,23 @@ class TextNormalizer:
         transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
         return transformed_text
 
+    def _get_glossary_cache(self):
+        current_keys = tuple(self.term_glossary.keys())
+        if self._glossary_pattern is not None and self._last_glossary_keys == current_keys:
+            return self._glossary_pattern, self._glossary_lower_map
+
+        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+        sorted_terms = sorted(current_keys, key=len, reverse=True)
+        if not sorted_terms:
+            return None, None
+
+        pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+        self._glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
+        self._glossary_lower_map = {term.lower(): term for term in sorted_terms}
+        self._last_glossary_keys = current_keys
+        return self._glossary_pattern, self._glossary_lower_map
+
     def apply_glossary_terms(self, text, lang="zh"):
         """
         应用术语词汇表，将专业术语替换为对应语言的读法
@@ -285,24 +305,29 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
+        pattern, lower_map = self._get_glossary_cache()
+        if not pattern:
+            return text
+
+        def replace_func(match):
+            matched_str = match.group(0)
+            term_key = lower_map.get(matched_str.lower())
+            if not term_key:
+                return matched_str
+
+            term_value = self.term_glossary[term_key]
             if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
+                replacement = term_value.get(lang)
+                if replacement is None:
+                    if term_value:
+                        replacement = next(iter(term_value.values()))
+                    else:
+                        replacement = term_key
             else:
                 replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+            return str(replacement)
 
-        return transformed_text
+        return pattern.sub(replace_func, text)
 
     def load_glossary(self, glossary_dict):
         """
