@@ -72,6 +72,9 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._compiled_glossary_keys = None
+        self._compiled_glossary_pattern = None
+        self._term_lookup = None
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -285,24 +288,27 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        # 检查是否需要重新编译正则
+        if self._compiled_glossary_keys != tuple(self.term_glossary.keys()):
+            # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+            # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+            self._compiled_glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
+            self._term_lookup = {term.lower(): term for term in sorted_terms}
+            self._compiled_glossary_keys = tuple(self.term_glossary.keys())
 
-        return transformed_text
+        def repl_func(match):
+            matched_str = match.group(0).lower()
+            original_term = self._term_lookup[matched_str]
+            term_value = self.term_glossary[original_term]
+
+            if isinstance(term_value, dict):
+                return term_value.get(lang, original_term)
+            else:
+                return term_value
+
+        return self._compiled_glossary_pattern.sub(repl_func, text)
 
     def load_glossary(self, glossary_dict):
         """
