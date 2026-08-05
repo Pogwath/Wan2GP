@@ -73,6 +73,11 @@ class TextNormalizer:
         # }
         self.term_glossary = dict()
 
+        # Caching for optimize dictionary-based string replacements
+        self._compiled_glossary_pattern = None
+        self._glossary_lookup = None
+        self._compiled_glossary_keys = None
+
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
         pattern = r"^[a-zA-Z0-9]+@[a-zA-Z0-9]+\.[a-zA-Z]+$"
@@ -285,24 +290,33 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
+        current_keys = self.term_glossary.keys()
+
+        # Lazy initialization or re-initialization if dictionary changed
+        if self._compiled_glossary_keys != current_keys:
+            # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+            # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+            sorted_terms = sorted(current_keys, key=len, reverse=True)
+            pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+            self._compiled_glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
+            self._glossary_lookup = {term.lower(): term for term in sorted_terms}
+            # Update state variables used in conditional check last for thread safety
+            self._compiled_glossary_keys = set(current_keys)
+
+        def repl(match):
+            matched_str = match.group(0).lower()
+            term = self._glossary_lookup.get(matched_str)
+            if not term:
+                return match.group(0) # Should not happen
+
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+                # Fallback logic: if requested lang not found or dict empty,
+                # fallback to the original term as defined in glossary (or term)
+                return term_value.get(lang, term_value.get(lang, term))
+            return term_value
 
-        return transformed_text
+        return self._compiled_glossary_pattern.sub(repl, text)
 
     def load_glossary(self, glossary_dict):
         """
