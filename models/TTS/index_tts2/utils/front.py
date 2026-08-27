@@ -73,6 +73,10 @@ class TextNormalizer:
         # }
         self.term_glossary = dict()
 
+        self._glossary_dirty = True
+        self._compiled_glossary_pattern = None
+        self._glossary_lookup = {}
+
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
         pattern = r"^[a-zA-Z0-9]+@[a-zA-Z0-9]+\.[a-zA-Z]+$"
@@ -285,24 +289,25 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        if getattr(self, '_glossary_dirty', True):
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            pattern_str = "|".join(map(re.escape, sorted_terms))
+            self._compiled_glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
+            self._glossary_lookup = {term.lower(): term for term in sorted_terms}
+            self._glossary_dirty = False
 
-        return transformed_text
+        def repl(match):
+            matched_str = match.group(0)
+            original_term = self._glossary_lookup.get(matched_str.lower())
+            if not original_term:
+                return matched_str
+
+            term_value = self.term_glossary[original_term]
+            if isinstance(term_value, dict):
+                return term_value.get(lang, original_term)
+            return term_value
+
+        return self._compiled_glossary_pattern.sub(repl, text)
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +324,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._glossary_dirty = True
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +348,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._glossary_dirty = True
                     return True
         return False
 
