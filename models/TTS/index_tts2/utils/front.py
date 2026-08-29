@@ -72,6 +72,10 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._compiled_glossary_pattern = None
+        self._glossary_replacements_zh = {}
+        self._glossary_replacements_en = {}
+        self._glossary_dirty = True
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -285,24 +289,44 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+        if self._glossary_dirty:
+            self._compile_glossary()
+
+        reps = self._glossary_replacements_zh if lang == "zh" else self._glossary_replacements_en
+
+        def repl(match):
+            return reps.get(match.group(0).lower(), match.group(0))
+
+        return self._compiled_glossary_pattern.sub(repl, text)
+
+    def _compile_glossary(self):
+        if not self.term_glossary:
+            self._compiled_glossary_pattern = None
+            self._glossary_dirty = False
+            return
+
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
+
+        zh_reps = {}
+        en_reps = {}
+
         for term in sorted_terms:
+            term_lower = term.lower()
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
+                # Follow original fallback logic: if a requested language is not found or the dictionary is empty, it falls back to the original term
+                zh_reps[term_lower] = term_value.get("zh", term_value.get("en", term))
+                en_reps[term_lower] = term_value.get("en", term_value.get("zh", term))
             else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+                zh_reps[term_lower] = term_value
+                en_reps[term_lower] = term_value
 
-        return transformed_text
+        self._glossary_replacements_zh = zh_reps
+        self._glossary_replacements_en = en_reps
+
+        pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+        self._compiled_glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
+        self._glossary_dirty = False
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +343,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._glossary_dirty = True
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +367,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._glossary_dirty = True
                     return True
         return False
 
