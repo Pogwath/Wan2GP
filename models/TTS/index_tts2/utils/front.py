@@ -73,6 +73,14 @@ class TextNormalizer:
         # }
         self.term_glossary = dict()
 
+        self._char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+        self._zh_char_rep_pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+
+        self._glossary_dirty = True
+        self._compiled_glossary_pattern = None
+        self._compiled_glossary_keys = None
+        self._lower_term_map = None
+
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
         pattern = r"^[a-zA-Z0-9]+@[a-zA-Z0-9]+\.[a-zA-Z]+$"
@@ -162,8 +170,7 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+            result = self._zh_char_rep_pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
                 text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
@@ -178,8 +185,7 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+            result = self._char_rep_pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -285,24 +291,31 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        # 延迟编译单一正则表达式
+        if self._glossary_dirty:
+            # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+            # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            self._lower_term_map = {term.lower(): term for term in sorted_terms}
 
-        return transformed_text
+            # 将所有术语合并为一个正则表达式，提高匹配效率: O(N*L) -> O(L)
+            pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+            self._compiled_glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
+
+            # 最后更新 dirty flag 保证原子性
+            self._glossary_dirty = False
+
+        def repl(match):
+            original_term = self._lower_term_map.get(match.group(0).lower())
+            if not original_term:
+                return match.group(0)
+
+            term_value = self.term_glossary[original_term]
+            if isinstance(term_value, dict):
+                return term_value.get(lang, term_value.get(lang, original_term))
+            return term_value
+
+        return self._compiled_glossary_pattern.sub(repl, text)
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +332,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._glossary_dirty = True
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +356,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._glossary_dirty = True
                     return True
         return False
 
