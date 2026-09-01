@@ -72,6 +72,10 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._compiled_glossary_keys = None
+        self._compiled_glossary_pattern = None
+        self._glossary_lookup = {"en": {}, "zh": {}}
+        self._glossary_lowercase_map = {}
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -267,6 +271,37 @@ class TextNormalizer:
         transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
         return transformed_text
 
+    def _compile_glossary_if_needed(self):
+        import hashlib
+        import json
+
+        # Determine if the dictionary has changed at all by hashing its contents.
+        # This handles the case where keys remain the same but values are updated.
+        try:
+            current_state_hash = hashlib.md5(json.dumps(self.term_glossary, sort_keys=True).encode()).hexdigest()
+        except TypeError:
+            # Fallback for non-serializable content, which shouldn't happen here but safe
+            current_state_hash = frozenset(self.term_glossary.keys())
+
+        if getattr(self, '_compiled_glossary_state_hash', None) != current_state_hash:
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            if not sorted_terms:
+                self._compiled_glossary_pattern = None
+                self._compiled_glossary_state_hash = current_state_hash
+                return
+
+            pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+            pattern = re.compile(pattern_str, re.IGNORECASE)
+
+            lowercase_map = {}
+            for term in sorted_terms:
+                lowercase_map[term.lower()] = term
+
+            self._glossary_lowercase_map = lowercase_map
+            self._compiled_glossary_pattern = pattern
+            # Atomic commit last
+            self._compiled_glossary_state_hash = current_state_hash
+
     def apply_glossary_terms(self, text, lang="zh"):
         """
         应用术语词汇表，将专业术语替换为对应语言的读法
@@ -285,24 +320,22 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        self._compile_glossary_if_needed()
 
-        return transformed_text
+        if not self._compiled_glossary_pattern:
+            return text
+
+        def repl(match):
+            matched_str = match.group(0).lower()
+            original_key = self._glossary_lowercase_map.get(matched_str)
+            if original_key:
+                term_value = self.term_glossary[original_key]
+                if isinstance(term_value, dict):
+                    return term_value.get(lang, term_value.get(lang, original_key))
+                return term_value
+            return match.group(0)
+
+        return self._compiled_glossary_pattern.sub(repl, text)
 
     def load_glossary(self, glossary_dict):
         """
