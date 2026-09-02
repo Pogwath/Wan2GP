@@ -3,6 +3,8 @@ from functools import lru_cache
 import os
 import traceback
 import re
+import json
+import hashlib
 from typing import List, Union, overload
 import warnings
 from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
@@ -72,6 +74,9 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._glossary_hash = None
+        self._glossary_pattern = None
+        self._glossary_term_lookup = None
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -285,24 +290,35 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
+        # 计算 hash 判断术语表是否更新
+        current_hash = hashlib.md5(json.dumps(self.term_glossary, sort_keys=True).encode()).hexdigest()
+
+        # 缓存未命中或术语表发生更新，重新编译正则
+        if self._glossary_hash != current_hash:
+            # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+            # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+
+            _glossary_pattern = re.compile(f"({pattern_str})", re.IGNORECASE)
+            _glossary_term_lookup = {term.lower(): term for term in sorted_terms}
+
+            # 更新缓存，最后更新 hash
+            self._glossary_pattern = _glossary_pattern
+            self._glossary_term_lookup = _glossary_term_lookup
+            self._glossary_hash = current_hash
+
+        def repl(match):
+            matched_str = match.group(1)
+            term = self._glossary_term_lookup[matched_str.lower()]
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
+                return term_value.get(lang, term)
             else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+                return term_value
 
-        return transformed_text
+        # 统一进行大小写不敏感的替换
+        return self._glossary_pattern.sub(repl, text)
 
     def load_glossary(self, glossary_dict):
         """
