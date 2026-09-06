@@ -11,6 +11,11 @@ from sentencepiece import SentencePieceProcessor
 
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
+        self.term_glossary = {}
+        self._compiled_glossary_keys = None
+        self._combined_pattern = None
+        self._replacement_map_zh = None
+        self._replacement_map_en = None
         self.zh_normalizer = None
         self.en_normalizer = None
         self.char_rep_map = {
@@ -267,6 +272,31 @@ class TextNormalizer:
         transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
         return transformed_text
 
+    def _compile_glossary(self):
+        current_keys = tuple(self.term_glossary.keys())
+        if self._compiled_glossary_keys == current_keys:
+            return
+
+        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+        self._replacement_map_zh = {}
+        self._replacement_map_en = {}
+
+        for term in sorted_terms:
+            term_value = self.term_glossary[term]
+            lower_term = term.lower()
+
+            if isinstance(term_value, dict):
+                self._replacement_map_zh[lower_term] = term_value.get("zh", term_value.get("zh", term))
+                self._replacement_map_en[lower_term] = term_value.get("en", term_value.get("en", term))
+            else:
+                self._replacement_map_zh[lower_term] = term_value
+                self._replacement_map_en[lower_term] = term_value
+
+        escaped_terms = [re.escape(term) for term in sorted_terms]
+        pattern_str = "|".join(escaped_terms)
+        self._combined_pattern = re.compile(pattern_str, re.IGNORECASE)
+        self._compiled_glossary_keys = current_keys
+
     def apply_glossary_terms(self, text, lang="zh"):
         """
         应用术语词汇表，将专业术语替换为对应语言的读法
@@ -285,24 +315,15 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        self._compile_glossary()
 
-        return transformed_text
+        replacement_map = self._replacement_map_zh if lang == "zh" else self._replacement_map_en
+
+        def replace_func(match):
+            matched_str = match.group(0).lower()
+            return replacement_map.get(matched_str, match.group(0))
+
+        return self._combined_pattern.sub(replace_func, text)
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +340,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._compiled_glossary_keys = None
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +364,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._compiled_glossary_keys = None
                     return True
         return False
 
