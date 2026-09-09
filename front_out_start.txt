@@ -1,0 +1,400 @@
+   0: # -*- coding: utf-8 -*-
+   1: from functools import lru_cache
+   2: import os
+   3: import traceback
+   4: import re
+   5: from typing import List, Union, overload
+   6: import warnings
+   7: from .common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
+   8: from sentencepiece import SentencePieceProcessor
+   9:
+  10:
+  11: class TextNormalizer:
+  12:     def __init__(self, enable_glossary=False):
+  13:         self.zh_normalizer = None
+  14:         self.en_normalizer = None
+  15:         self.char_rep_map = {
+  16:             "：": ",",
+  17:             "；": ",",
+  18:             ";": ",",
+  19:             "，": ",",
+  20:             "。": ".",
+  21:             "！": "!",
+  22:             "？": "?",
+  23:             "\n": " ",
+  24:             "·": "-",
+  25:             "、": ",",
+  26:             "...": "…",
+  27:             ",,,": "…",
+  28:             "，，，": "…",
+  29:             "……": "…",
+  30:             "“": "'",
+  31:             "”": "'",
+  32:             '"': "'",
+  33:             "‘": "'",
+  34:             "’": "'",
+  35:             "（": "'",
+  36:             "）": "'",
+  37:             "(": "'",
+  38:             ")": "'",
+  39:             "《": "'",
+  40:             "》": "'",
+  41:             "【": "'",
+  42:             "】": "'",
+  43:             "[": "'",
+  44:             "]": "'",
+  45:             "—": "-",
+  46:             "～": "-",
+  47:             "~": "-",
+  48:             "「": "'",
+  49:             "」": "'",
+  50:             ":": ",",
+  51:         }
+  52:         self.zh_char_rep_map = {
+  53:             "$": ".",
+  54:             **self.char_rep_map,
+  55:         }
+  56:         self.enable_glossary = enable_glossary
+  57:         # 术语词汇表：用户可自定义专业术语的读法
+  58:         # 格式: {"原始术语": {"en": "英文读法", "zh": "中文读法"}}
+  59:         # "M.2": {"en": "M dot two", "zh": "M 二"},
+  60:         # "PCIe 5.0": {"en": "PCIE five", "zh": "PCIE 五点零"},
+  61:         # "PCIe 4.0": {"en": "PCIE four", "zh": "PCIE 四点零"},
+  62:         # "AHCI": "A H C I",
+  63:         # "TTS": "T T S",
+  64:         # "Inc.": {"en": "Ink"},
+  65:         # ".json": {"en": " dot Jay-Son", "zh": "点 Jay-Son"},
+  66:         # "C++": {"en": "C plus plus", "zh": "C 加加"},
+  67:         # "C#": "C sharp"
+  68:         # self.term_glossary = {
+  69:         #     "C++": {"en": "C plus plus", "zh": "C 加加"},
+  70:         #     "C#": "C sharp",
+  71:         #     "CMake": "C Make",
+  72:         # }
+  73:         self.term_glossary = dict()
+  74:
+  75:     def match_email(self, email):
+  76:         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
+  77:         pattern = r"^[a-zA-Z0-9]+@[a-zA-Z0-9]+\.[a-zA-Z]+$"
+  78:         return re.match(pattern, email) is not None
+  79:
+  80:     PINYIN_TONE_PATTERN = r"(?<![a-z])((?:[bpmfdtnlgkhjqxzcsryw]|[zcs]h)?(?:[aeiouüv]|[ae]i|u[aio]|ao|ou|i[aue]|[uüv]e|[uvü]ang?|uai|[aeiuv]n|[aeio]ng|ia[no]|i[ao]ng)|ng|er)([1-5])"
+  81:     """
+  82:     匹配拼音声调格式：pinyin+数字，声调1-5，5表示轻声
+  83:     例如：xuan4, jve2, ying1, zhong4, shang5
+  84:     不匹配：beta1, voice2
+  85:     """
+  86:     NAME_PATTERN = r"[\u4e00-\u9fff]+(?:[-·—][\u4e00-\u9fff]+){1,2}"
+  87:     """
+  88:     匹配人名，格式：中文·中文，中文·中文-中文
+  89:     例如：克里斯托弗·诺兰，约瑟夫·高登-莱维特
+  90:     """
+  91:
+  92:     TECH_TERM_PATTERN = r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+"
+  93:     """
+  94:     匹配技术术语，格式：字母开头+(字母或数字)*+(-字母或数字)+
+  95:     例如：GPT-5-nano, F5-TTS, Fish-Speech, GPT-5, CosyVoice-2
+  96:     必须以字母开头，避免匹配纯数字（如电话号码 135-4567-8900）
+  97:     用于保护连字符结构，防止中文normalizer将连字符解析为减号（如"负五减"）
+  98:     """
+  99:
+ 100:     # 匹配常见英语缩写 's，仅用于替换为 is，不匹配所有 's
+ 101:     ENGLISH_CONTRACTION_PATTERN = r"(what|where|who|which|how|t?here|it|s?he|that|this)'s"
+ 102:
+ 103:
+ 104:     def use_chinese(self, s):
+ 105:         has_chinese = bool(re.search(r"[\u4e00-\u9fff]", s))
+ 106:         has_alpha = bool(re.search(r"[a-zA-Z]", s))
+ 107:         is_email = self.match_email(s)
+ 108:         if has_chinese or not has_alpha or is_email:
+ 109:             return True
+ 110:
+ 111:         has_pinyin = bool(re.search(TextNormalizer.PINYIN_TONE_PATTERN, s, re.IGNORECASE))
+ 112:         return has_pinyin
+ 113:
+ 114:     def load(self):
+ 115:         # print(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+ 116:         # sys.path.append(model_dir)
+ 117:         import platform
+ 118:         if self.zh_normalizer is not None and self.en_normalizer is not None:
+ 119:             return
+ 120:         if platform.system() != "Linux" or True:  # Mac and Windows
+ 121:             from wetext import Normalizer
+ 122:
+ 123:             self.zh_normalizer = Normalizer(remove_erhua=False, lang="zh", operator="tn")
+ 124:             self.en_normalizer = Normalizer(lang="en", operator="tn")
+ 125:         else:
+ 126:             from tn.chinese.normalizer import Normalizer as NormalizerZh
+ 127:             from tn.english.normalizer import Normalizer as NormalizerEn
+ 128:             # use new cache dir for build tagger rules with disable remove_interjections and remove_erhua
+ 129:             cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tagger_cache")
+ 130:             if not os.path.exists(cache_dir):
+ 131:                 os.makedirs(cache_dir)
+ 132:                 with open(os.path.join(cache_dir, ".gitignore"), "w") as f:
+ 133:                     f.write("*\n")
+ 134:             self.zh_normalizer = NormalizerZh(
+ 135:                 cache_dir=cache_dir, remove_interjections=False, remove_erhua=False, overwrite_cache=False
+ 136:             )
+ 137:             self.en_normalizer = NormalizerEn(overwrite_cache=False)
+ 138:
+ 139:     def normalize(self, text: str) -> str:
+ 140:         if not self.zh_normalizer or not self.en_normalizer:
+ 141:             print("Error, text normalizer is not initialized !!!")
+ 142:             return ""
+ 143:         if self.use_chinese(text):
+ 144:             text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+ 145:             # 应用术语词汇表（优先级最高，在所有保护之前）
+ 146:             if self.enable_glossary:
+ 147:                 text = self.apply_glossary_terms(text, lang="zh")
+ 148:             # 保护技术术语（如 GPT-5-nano）避免被中文normalizer错误处理
+ 149:             replaced_text, tech_list = self.save_tech_terms(text.rstrip())
+ 150:             replaced_text, pinyin_list = self.save_pinyin_tones(replaced_text)
+ 151:
+ 152:             replaced_text, original_name_list = self.save_names(replaced_text)
+ 153:             try:
+ 154:                 result = self.zh_normalizer.normalize(replaced_text)
+ 155:             except Exception:
+ 156:                 result = ""
+ 157:                 print(traceback.format_exc())
+ 158:             # 恢复人名
+ 159:             result = self.restore_names(result, original_name_list)
+ 160:             # 恢复拼音声调
+ 161:             result = self.restore_pinyin_tones(result, pinyin_list)
+ 162:             # 恢复技术术语
+ 163:             result = self.restore_tech_terms(result, tech_list)
+ 164:             pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
+ 165:             result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+ 166:         else:
+ 167:             try:
+ 168:                 text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+ 169:                 # 应用术语词汇表（优先级最高，在所有保护之前）
+ 170:                 if self.enable_glossary:
+ 171:                     text = self.apply_glossary_terms(text, lang="en")
+ 172:                 # 保护技术术语（如 GPT-5-Nano）避免被英文normalizer错误处理
+ 173:                 replaced_text, tech_list = self.save_tech_terms(text)
+ 174:                 result = self.en_normalizer.normalize(replaced_text)
+ 175:                 # 恢复技术术语
+ 176:                 result = self.restore_tech_terms(result, tech_list)
+ 177:             except Exception:
+ 178:                 result = text
+ 179:                 print(traceback.format_exc())
+ 180:             pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
+ 181:             result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+ 182:         return result
+ 183:
+ 184:     def correct_pinyin(self, pinyin: str):
+ 185:         """
+ 186:         将 jqx 的韵母为 u/ü 的拼音转换为 v
+ 187:         如：ju -> jv , que -> qve, xün -> xvn
+ 188:         """
+ 189:         if pinyin[0] not in "jqxJQX":
+ 190:             return pinyin
+ 191:         # 匹配 jqx 的韵母为 u/ü 的拼音
+ 192:         pattern = r"([jqx])[uü](n|e|an)*(\d)"
+ 193:         repl = r"\g<1>v\g<2>\g<3>"
+ 194:         pinyin = re.sub(pattern, repl, pinyin, flags=re.IGNORECASE)
+ 195:         return pinyin.upper()
+ 196:
+ 197:     def save_names(self, original_text):
+ 198:         """
+ 199:         替换人名为占位符 <n_a>、 <n_b>, ...
+ 200:         例如：克里斯托弗·诺兰 -> <n_a>
+ 201:         """
+ 202:         # 人名
+ 203:         name_pattern = re.compile(TextNormalizer.NAME_PATTERN, re.IGNORECASE)
+ 204:         original_name_list = re.findall(name_pattern, original_text)
+ 205:         if len(original_name_list) == 0:
+ 206:             return (original_text, None)
+ 207:         original_name_list = list(set("".join(n) for n in original_name_list))
+ 208:         transformed_text = original_text
+ 209:         # 替换占位符 <n_a>、 <n_b>, ...
+ 210:         for i, name in enumerate(original_name_list):
+ 211:             number = chr(ord("a") + i)
+ 212:             transformed_text = transformed_text.replace(name, f"<n_{number}>")
+ 213:
+ 214:         return transformed_text, original_name_list
+ 215:
+ 216:     def restore_names(self, normalized_text, original_name_list):
+ 217:         """
+ 218:         恢复人名为原来的文字
+ 219:         例如：<n_a> -> original_name_list[0]
+ 220:         """
+ 221:         if not original_name_list or len(original_name_list) == 0:
+ 222:             return normalized_text
+ 223:
+ 224:         transformed_text = normalized_text
+ 225:         # 替换为占位符 <n_a>、 <n_b>, ...
+ 226:         for i, name in enumerate(original_name_list):
+ 227:             number = chr(ord("a") + i)
+ 228:             transformed_text = transformed_text.replace(f"<n_{number}>", name)
+ 229:         return transformed_text
+ 230:
+ 231:     def save_tech_terms(self, original_text):
+ 232:         """
+ 233:         保护技术术语中的连字符，防止被中文normalizer解析为减号
+ 234:         策略：将术语中的连字符替换为特殊占位符<H>，数字仍可被正常处理
+ 235:         例如：GPT-5-nano -> GPT<H>5<H>nano，然后 5 被转换为 五
+ 236:         最终恢复为：GPT-五-nano
+ 237:         """
+ 238:         tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
+ 239:         original_tech_list = tech_pattern.findall(original_text)
+ 240:         if len(original_tech_list) == 0:
+ 241:             return (original_text, None)
+ 242:
+ 243:         # 去重并按长度降序排列（避免短匹配先替换导致问题）
+ 244:         original_tech_list = sorted(set(original_tech_list), key=len, reverse=True)
+ 245:         transformed_text = original_text
+ 246:
+ 247:         # 将术语中的连字符替换为占位符 <H>
+ 248:         for term in original_tech_list:
+ 249:             # 将 GPT-5-nano 替换为 GPT<H>5<H>nano
+ 250:             protected_term = term.replace("-", "<H>")
+ 251:             transformed_text = transformed_text.replace(term, protected_term)
+ 252:
+ 253:         return transformed_text, original_tech_list
+ 254:
+ 255:     def restore_tech_terms(self, normalized_text, original_tech_list):
+ 256:         """
+ 257:         恢复技术术语中的连字符
+ 258:         将占位符 <H> 恢复为连字符 -
+ 259:         同时清理 normalizer 可能在占位符周围添加的多余空格
+ 260:         """
+ 261:         if not original_tech_list or len(original_tech_list) == 0:
+ 262:             return normalized_text
+ 263:
+ 264:         # 清理 <H> 周围可能的空格，然后恢复为连字符
+ 265:         # 处理模式: " <H> " -> "-", " <H>" -> "-", "<H> " -> "-", "<H>" -> "-"
+ 266:         transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
+ 267:         return transformed_text
+ 268:
+ 269:     def apply_glossary_terms(self, text, lang="zh"):
+ 270:         """
+ 271:         应用术语词汇表，将专业术语替换为对应语言的读法
+ 272:
+ 273:         Args:
+ 274:             text: 待处理文本
+ 275:             lang: 语言类型 "zh" 或 "en"
+ 276:
+ 277:         Returns:
+ 278:             处理后的文本
+ 279:
+ 280:         Example:
+ 281:             "M.2 NVMe SSD" -> (zh) "M 二 NVMe SSD"
+ 282:             "M.2 NVMe SSD" -> (en) "M dot two NVMe SSD"
+ 283:         """
+ 284:         if not self.term_glossary:
+ 285:             return text
+ 286:
+ 287:         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+ 288:         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+ 289:         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+ 290:         @lru_cache(maxsize=42)
+ 291:         def get_term_pattern(term: str):
+ 292:             return re.compile(re.escape(term), re.IGNORECASE)
+ 293:         transformed_text = text
+ 294:         for term in sorted_terms:
+ 295:             term_value = self.term_glossary[term]
+ 296:             if isinstance(term_value, dict):
+ 297:                 replacement = term_value.get(lang, term_value.get(lang, term))
+ 298:             else:
+ 299:                 replacement = term_value
+ 300:             # 使用正则进行大小写不敏感的替换
+ 301:             pattern = get_term_pattern(term)
+ 302:             transformed_text = pattern.sub(replacement, transformed_text)
+ 303:
+ 304:         return transformed_text
+ 305:
+ 306:     def load_glossary(self, glossary_dict):
+ 307:         """
+ 308:         加载外部术语词汇表
+ 309:
+ 310:         Args:
+ 311:             glossary_dict: 术语词典，格式为 {"术语": {"en": "英文读法", "zh": "中文读法"}}
+ 312:
+ 313:         Example:
+ 314:             normalizer.load_glossary({
+ 315:                 "M.2": {"en": "M dot two", "zh": "M 二"},
+ 316:                 "PCIe": {"en": "PCIE", "zh": "PCIE"}
+ 317:             })
+ 318:         """
+ 319:         if glossary_dict and isinstance(glossary_dict, dict):
+ 320:             self.term_glossary.update(glossary_dict)
+ 321:
+ 322:     def load_glossary_from_yaml(self, glossary_path):
+ 323:         """
+ 324:         从 YAML 文件加载术语词汇表
+ 325:
+ 326:         Args:
+ 327:             glossary_path: YAML 文件路径
+ 328:
+ 329:         Example:
+ 330:             normalizer.load_glossary_from_yaml("checkpoints/glossary.yaml")
+ 331:
+ 332:         YAML 文件格式:
+ 333:             M.2:
+ 334:               en: M dot two
+ 335:               zh: M 二
+ 336:             NVMe: N-V-M-E  # 中英文相同读法
+ 337:         """
+ 338:         if glossary_path and os.path.exists(glossary_path):
+ 339:             import yaml
+ 340:             with open(glossary_path, 'r', encoding='utf-8') as f:
+ 341:                 external_glossary = yaml.safe_load(f)
+ 342:                 if external_glossary and isinstance(external_glossary, dict):
+ 343:                     self.term_glossary = external_glossary
+ 344:                     return True
+ 345:         return False
+ 346:
+ 347:     def save_glossary_to_yaml(self, glossary_path):
+ 348:         """
+ 349:         保存术语词汇表到 YAML 文件
+ 350:
+ 351:         Args:
+ 352:             glossary_path: YAML 文件路径
+ 353:         """
+ 354:         import yaml
+ 355:         with open(glossary_path, 'w', encoding='utf-8') as f:
+ 356:             yaml.dump(self.term_glossary, f, allow_unicode=True, default_flow_style=False)
+ 357:
+ 358:     def save_pinyin_tones(self, original_text):
+ 359:         """
+ 360:         替换拼音声调为占位符 <pinyin_a>, <pinyin_b>, ...
+ 361:         例如：xuan4 -> <pinyin_a>
+ 362:         """
+ 363:         # 声母韵母+声调数字
+ 364:         origin_pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
+ 365:         original_pinyin_list = re.findall(origin_pinyin_pattern, original_text)
+ 366:         if len(original_pinyin_list) == 0:
+ 367:             return (original_text, None)
+ 368:         original_pinyin_list = list(set("".join(p) for p in original_pinyin_list))
+ 369:         transformed_text = original_text
+ 370:         # 替换为占位符 <pinyin_a>, <pinyin_b>, ...
+ 371:         for i, pinyin in enumerate(original_pinyin_list):
+ 372:             number = chr(ord("a") + i)
+ 373:             transformed_text = transformed_text.replace(pinyin, f"<pinyin_{number}>")
+ 374:
+ 375:         # print("original_text: ", original_text)
+ 376:         # print("transformed_text: ", transformed_text)
+ 377:         return transformed_text, original_pinyin_list
+ 378:
+ 379:     def restore_pinyin_tones(self, normalized_text, original_pinyin_list):
+ 380:         """
+ 381:         恢复拼音中的音调数字（1-5）为原来的拼音
+ 382:         例如：<pinyin_a> -> original_pinyin_list[0]
+ 383:         """
+ 384:         if not original_pinyin_list or len(original_pinyin_list) == 0:
+ 385:             return normalized_text
+ 386:
+ 387:         transformed_text = normalized_text
+ 388:         # 替换占位符 <pinyin_a>, <pinyin_b>, ...
+ 389:         for i, pinyin in enumerate(original_pinyin_list):
+ 390:             number = chr(ord("a") + i)
+ 391:             pinyin = self.correct_pinyin(pinyin)
+ 392:             transformed_text = transformed_text.replace(f"<pinyin_{number}>", pinyin)
+ 393:         # print("normalized_text: ", normalized_text)
+ 394:         # print("transformed_text: ", transformed_text)
+ 395:         return transformed_text
+ 396:
+ 397:
+ 398: class TextTokenizer:
+ 399:     def __init__(self, vocab_file: str, normalizer: TextNormalizer = None):
