@@ -54,6 +54,10 @@ class TextNormalizer:
             "$": ".",
             **self.char_rep_map,
         }
+
+        self._zh_char_rep_items = sorted(self.zh_char_rep_map.items(), key=lambda x: len(x[0]), reverse=True)
+        self._char_rep_items = sorted(self.char_rep_map.items(), key=lambda x: len(x[0]), reverse=True)
+
         self.enable_glossary = enable_glossary
         # 术语词汇表：用户可自定义专业术语的读法
         # 格式: {"原始术语": {"en": "英文读法", "zh": "中文读法"}}
@@ -72,6 +76,9 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._glossary_dirty = True
+        self._glossary_pattern = None
+        self._glossary_lookup = {}
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -162,8 +169,9 @@ class TextNormalizer:
             result = self.restore_pinyin_tones(result, pinyin_list)
             # 恢复技术术语
             result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
+
+            for k, v in self._zh_char_rep_items:
+                result = result.replace(k, v)
         else:
             try:
                 text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
@@ -178,8 +186,9 @@ class TextNormalizer:
             except Exception:
                 result = text
                 print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
+
+            for k, v in self._char_rep_items:
+                result = result.replace(k, v)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -237,19 +246,20 @@ class TextNormalizer:
         最终恢复为：GPT-五-nano
         """
         tech_pattern = re.compile(TextNormalizer.TECH_TERM_PATTERN)
-        original_tech_list = tech_pattern.findall(original_text)
-        if len(original_tech_list) == 0:
+
+        matches = []
+        def repl(m):
+            term = m.group(0)
+            matches.append(term)
+            return term.replace("-", "<H>")
+
+        transformed_text = tech_pattern.sub(repl, original_text)
+
+        if not matches:
             return (original_text, None)
 
-        # 去重并按长度降序排列（避免短匹配先替换导致问题）
-        original_tech_list = sorted(set(original_tech_list), key=len, reverse=True)
-        transformed_text = original_text
-
-        # 将术语中的连字符替换为占位符 <H>
-        for term in original_tech_list:
-            # 将 GPT-5-nano 替换为 GPT<H>5<H>nano
-            protected_term = term.replace("-", "<H>")
-            transformed_text = transformed_text.replace(term, protected_term)
+        # 保持原有接口返回: 去重并按长度降序排列
+        original_tech_list = sorted(set(matches), key=len, reverse=True)
 
         return transformed_text, original_tech_list
 
@@ -285,24 +295,22 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        if self._glossary_dirty:
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            self._glossary_pattern = re.compile("|".join(map(re.escape, sorted_terms)), re.IGNORECASE)
+            self._glossary_lookup = {term.lower(): term for term in sorted_terms}
+            self._glossary_dirty = False
 
-        return transformed_text
+        def repl(match):
+            term = match.group(0)
+            original_term = self._glossary_lookup[term.lower()]
+            term_value = self.term_glossary[original_term]
+
+            if isinstance(term_value, dict):
+                return term_value.get(lang, term_value.get(lang, original_term))
+            return term_value
+
+        return self._glossary_pattern.sub(repl, text)
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +327,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._glossary_dirty = True
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +351,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._glossary_dirty = True
                     return True
         return False
 
@@ -363,19 +373,23 @@ class TextNormalizer:
         """
         # 声母韵母+声调数字
         origin_pinyin_pattern = re.compile(TextNormalizer.PINYIN_TONE_PATTERN, re.IGNORECASE)
-        original_pinyin_list = re.findall(origin_pinyin_pattern, original_text)
-        if len(original_pinyin_list) == 0:
-            return (original_text, None)
-        original_pinyin_list = list(set("".join(p) for p in original_pinyin_list))
-        transformed_text = original_text
-        # 替换为占位符 <pinyin_a>, <pinyin_b>, ...
-        for i, pinyin in enumerate(original_pinyin_list):
-            number = chr(ord("a") + i)
-            transformed_text = transformed_text.replace(pinyin, f"<pinyin_{number}>")
 
-        # print("original_text: ", original_text)
-        # print("transformed_text: ", transformed_text)
-        return transformed_text, original_pinyin_list
+        matches = []
+        seen = {}
+
+        def repl(m):
+            term = m.group(0)
+            if term not in seen:
+                seen[term] = chr(ord("a") + len(seen))
+                matches.append(term)
+            return f"<pinyin_{seen[term]}>"
+
+        transformed_text = origin_pinyin_pattern.sub(repl, original_text)
+
+        if not matches:
+            return (original_text, None)
+
+        return transformed_text, matches
 
     def restore_pinyin_tones(self, normalized_text, original_pinyin_list):
         """
