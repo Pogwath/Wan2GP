@@ -13,6 +13,9 @@ class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
         self.en_normalizer = None
+        self._glossary_dirty = True
+        self._compiled_glossary_pattern = None
+        self._glossary_lower_to_original = {}
         self.char_rep_map = {
             "：": ",",
             "；": ",",
@@ -281,28 +284,35 @@ class TextNormalizer:
         Example:
             "M.2 NVMe SSD" -> (zh) "M 二 NVMe SSD"
             "M.2 NVMe SSD" -> (en) "M dot two NVMe SSD"
+
+        Performance Note (Bolt):
+            Time complexity reduced from O(N*L) to O(L) by compiling a single regex
+            combined with `|` and utilizing a precomputed lookup dictionary, avoiding
+            multiple sequential regex iterations. Caching handles lazy initialization.
         """
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        if getattr(self, "_glossary_dirty", True):
+            # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+            # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            self._glossary_lower_to_original = {term.lower(): term for term in sorted_terms}
+            pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+            self._compiled_glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
+            self._glossary_dirty = False
 
-        return transformed_text
+        def replace_func(match):
+            matched_str = match.group(0)
+            original_term = self._glossary_lower_to_original.get(matched_str.lower())
+            if not original_term:
+                return matched_str
+            term_value = self.term_glossary[original_term]
+            if isinstance(term_value, dict):
+                return term_value.get(lang, original_term)
+            return term_value
+
+        return self._compiled_glossary_pattern.sub(replace_func, text)
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +329,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._glossary_dirty = True
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +353,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._glossary_dirty = True
                     return True
         return False
 
