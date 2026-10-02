@@ -72,6 +72,31 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._compiled_glossary_pattern = None
+        self._glossary_lookup_zh = None
+        self._glossary_lookup_en = None
+
+    def _compile_glossary(self):
+        if not self.term_glossary:
+            return
+
+        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+        pattern_str = "|".join(re.escape(term) for term in sorted_terms)
+        self._glossary_lookup_zh = {}
+        self._glossary_lookup_en = {}
+
+        for term in sorted_terms:
+            term_value = self.term_glossary[term]
+            term_lower = term.lower()
+            if term_lower not in self._glossary_lookup_zh:
+                if isinstance(term_value, dict):
+                    self._glossary_lookup_zh[term_lower] = term_value.get("zh", term_value.get("zh", term))
+                    self._glossary_lookup_en[term_lower] = term_value.get("en", term_value.get("en", term))
+                else:
+                    self._glossary_lookup_zh[term_lower] = term_value
+                    self._glossary_lookup_en[term_lower] = term_value
+
+        self._compiled_glossary_pattern = re.compile(pattern_str, re.IGNORECASE)
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -285,24 +310,17 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        if self._compiled_glossary_pattern is None:
+            self._compile_glossary()
 
-        return transformed_text
+        lookup = self._glossary_lookup_zh if lang == "zh" else self._glossary_lookup_en
+
+        def replace_match(match):
+            term_lower = match.group(0).lower()
+            return lookup.get(term_lower, match.group(0))
+
+        # Using a single combined regex using `|` mapped to a lookup dictionary reduces time complexity from O(N * L) to O(L)
+        return self._compiled_glossary_pattern.sub(replace_match, text)
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +337,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._compiled_glossary_pattern = None
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +361,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._compiled_glossary_pattern = None
                     return True
         return False
 
