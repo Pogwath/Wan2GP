@@ -13,6 +13,10 @@ class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
         self.en_normalizer = None
+        self._compiled_glossary_pattern = None
+        self._glossary_lookup = {}
+        self._cached_lang = None
+        self._glossary_dirty = True
         self.char_rep_map = {
             "：": ",",
             "；": ",",
@@ -267,6 +271,32 @@ class TextNormalizer:
         transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
         return transformed_text
 
+    def _compile_glossary(self, lang):
+        if not self.term_glossary:
+            return None
+
+        if not self._glossary_dirty and self._compiled_glossary_pattern and self._cached_lang == lang:
+            return self._compiled_glossary_pattern
+
+        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+        escaped_terms = [re.escape(term) for term in sorted_terms]
+        pattern = re.compile(r'(' + '|'.join(escaped_terms) + r')', re.IGNORECASE)
+
+        lookup = {}
+        for term in sorted_terms:
+            term_value = self.term_glossary[term]
+            if isinstance(term_value, dict):
+                replacement = term_value.get(lang, term_value.get(lang, term))
+            else:
+                replacement = term_value
+            lookup[term.lower()] = replacement
+
+        self._glossary_lookup = lookup
+        self._cached_lang = lang
+        self._compiled_glossary_pattern = pattern
+        self._glossary_dirty = False
+        return pattern
+
     def apply_glossary_terms(self, text, lang="zh"):
         """
         应用术语词汇表，将专业术语替换为对应语言的读法
@@ -285,24 +315,15 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        pattern = self._compile_glossary(lang)
+        if not pattern:
+            return text
 
-        return transformed_text
+        def replacer(match):
+            term_lower = match.group(0).lower()
+            return self._glossary_lookup.get(term_lower, match.group(0))
+
+        return pattern.sub(replacer, text)
 
     def load_glossary(self, glossary_dict):
         """
@@ -319,6 +340,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._glossary_dirty = True
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +364,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._glossary_dirty = True
                     return True
         return False
 
