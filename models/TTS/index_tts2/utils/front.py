@@ -72,6 +72,10 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._compiled_glossary = False
+        self._sorted_terms = []
+        self._term_patterns = {}
+        self._term_lower = {}
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -267,6 +271,16 @@ class TextNormalizer:
         transformed_text = re.sub(r'\s*<H>\s*', '-', normalized_text)
         return transformed_text
 
+    def _compile_glossary(self):
+        """
+        预编译并缓存术语词汇表的正则模式和排序列表，提升大规模处理性能。
+        """
+        self._sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+        self._term_patterns = {term: re.compile(re.escape(term), re.IGNORECASE) for term in self._sorted_terms}
+        # 预计算小写形式以进行快速子串检查
+        self._term_lower = {term: term.lower() for term in self._sorted_terms}
+        self._compiled_glossary = True
+
     def apply_glossary_terms(self, text, lang="zh"):
         """
         应用术语词汇表，将专业术语替换为对应语言的读法
@@ -285,22 +299,26 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        if not self._compiled_glossary:
+            self._compile_glossary()
+
         transformed_text = text
-        for term in sorted_terms:
-            term_value = self.term_glossary[term]
-            if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
-            else:
-                replacement = term_value
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+        text_lower = transformed_text.lower()
+
+        for term in self._sorted_terms:
+            term_lower = self._term_lower[term]
+            # 快速子串检查，避免不必要的正则替换开销
+            if term_lower in text_lower:
+                term_value = self.term_glossary[term]
+                if isinstance(term_value, dict):
+                    replacement = term_value.get(lang, term_value.get(lang, term))
+                else:
+                    replacement = term_value
+
+                pattern = self._term_patterns[term]
+                transformed_text = pattern.sub(replacement, transformed_text)
+                # 更新小写文本，以应对替换后产生的级联匹配
+                text_lower = transformed_text.lower()
 
         return transformed_text
 
@@ -319,6 +337,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._compiled_glossary = False
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +361,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._compiled_glossary = False
                     return True
         return False
 
