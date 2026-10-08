@@ -72,6 +72,7 @@ class TextNormalizer:
         #     "CMake": "C Make",
         # }
         self.term_glossary = dict()
+        self._sorted_terms = None
 
     def match_email(self, email):
         # 正则表达式匹配邮箱格式：数字英文@数字英文.英文
@@ -285,22 +286,31 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        # Initialize caches safely
+        if not hasattr(self, '_sorted_terms') or self._sorted_terms is None:
+            sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+            self._term_patterns = {term: re.compile(re.escape(term), re.IGNORECASE) for term in sorted_terms}
+            self._term_lower_map = {term: term.lower() for term in sorted_terms}
+            self._sorted_terms = sorted_terms # Atomic update to prevent race conditions
+
+        text_lower = text.lower()
         transformed_text = text
-        for term in sorted_terms:
+        for term in self._sorted_terms:
+            term_lower = self._term_lower_map[term]
+            # Fast substring pre-check avoids invoking regex engine if term is missing
+            if term_lower not in text_lower:
+                continue
+
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
                 replacement = term_value.get(lang, term_value.get(lang, term))
             else:
                 replacement = term_value
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            pattern = self._term_patterns[term]
             transformed_text = pattern.sub(replacement, transformed_text)
+            # Update text_lower to reflect changes (to prevent multiple passes matching removed words)
+            text_lower = transformed_text.lower()
 
         return transformed_text
 
@@ -319,6 +329,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._sorted_terms = None
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +353,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._sorted_terms = None
                     return True
         return False
 
