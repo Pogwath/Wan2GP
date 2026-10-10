@@ -11,6 +11,8 @@ from sentencepiece import SentencePieceProcessor
 
 class TextNormalizer:
     def __init__(self, enable_glossary=False):
+        self._compiled_glossary = None
+        self._glossary_dirty = True
         self.zh_normalizer = None
         self.en_normalizer = None
         self.char_rep_map = {
@@ -285,22 +287,36 @@ class TextNormalizer:
         if not self.term_glossary:
             return text
 
-        # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
-        # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
-        sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
+        if getattr(self, "_compiled_glossary", None) is None or getattr(self, "_glossary_dirty", True):
+            self._compiled_glossary = []
+            # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
+            # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
+            for term in sorted(self.term_glossary.keys(), key=len, reverse=True):
+                self._compiled_glossary.append((
+                    term,
+                    re.compile(re.escape(term), re.IGNORECASE)
+                ))
+            self._glossary_dirty = False
+
         transformed_text = text
-        for term in sorted_terms:
+        text_lower = text.lower()
+
+        for term, pattern in self._compiled_glossary:
+            # fast substring pre-check to avoid unnecessary regex engine overhead
+            if term.lower() not in text_lower:
+                continue
+
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
                 replacement = term_value.get(lang, term_value.get(lang, term))
             else:
                 replacement = term_value
+
             # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
-            transformed_text = pattern.sub(replacement, transformed_text)
+            new_text = pattern.sub(replacement, transformed_text)
+            if new_text != transformed_text:
+                transformed_text = new_text
+                text_lower = transformed_text.lower()
 
         return transformed_text
 
@@ -319,6 +335,7 @@ class TextNormalizer:
         """
         if glossary_dict and isinstance(glossary_dict, dict):
             self.term_glossary.update(glossary_dict)
+            self._glossary_dirty = True
 
     def load_glossary_from_yaml(self, glossary_path):
         """
@@ -342,6 +359,7 @@ class TextNormalizer:
                 external_glossary = yaml.safe_load(f)
                 if external_glossary and isinstance(external_glossary, dict):
                     self.term_glossary = external_glossary
+                    self._glossary_dirty = True
                     return True
         return False
 
