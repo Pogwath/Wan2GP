@@ -3,7 +3,7 @@
 import time
 import traceback
 
-from threading import Thread, Lock
+from threading import Thread, Lock, Condition
 
 
 class _TaskRunner:
@@ -12,18 +12,16 @@ class _TaskRunner:
         self.thread_name = self.runner_name.replace("_", " ").strip().title() or "Default"
         self.task_queue = []
         self.lock = Lock()
+        self.cond = Condition(self.lock)
         self.thread = None
 
     def _process_tasks(self):
         while True:
             task = None
-            with self.lock:
-                if self.task_queue:
-                    task = self.task_queue.pop(0)
-                    
-            if task is None:
-                time.sleep(0.001)
-                continue
+            with self.cond:
+                while not self.task_queue:
+                    self.cond.wait()
+                task = self.task_queue.pop(0)
                 
             func, args, kwargs, thread_name = task
             current_name = None
@@ -43,8 +41,9 @@ class _TaskRunner:
                     thread.name = current_name
 
     def add_task(self, func, *args, thread_name=None, **kwargs):
-        with self.lock:
+        with self.cond:
             self.task_queue.append((func, args, kwargs, thread_name))
+            self.cond.notify()
             thread = None if self.thread is not None else Thread(target=self._process_tasks, daemon=True, name=self.thread_name)
             if thread is not None:
                 self.thread = thread
@@ -60,7 +59,7 @@ class Listener:
     @classmethod
     def _get_runner(cls, runner_name="default"):
         runner_name = str(runner_name or "default")
-        with cls.lock:
+        with cls.cond:
             runner = cls.runners.get(runner_name, None)
             if runner is None:
                 runner = _TaskRunner(runner_name)
@@ -84,30 +83,30 @@ class FIFOQueue:
     def __init__(self):
         self.queue = []
         self.lock = Lock()
+        self.cond = Condition(self.lock)
 
     def push(self, cmd, data = None):
-        with self.lock:
+        with self.cond:
             self.queue.append( (cmd, data) )
+            self.cond.notify()
 
     def pop(self):
-        with self.lock:
+        with self.cond:
             if self.queue:
                 return self.queue.pop(0)
             return None
 
     def top(self):
-        with self.lock:
+        with self.cond:
             if self.queue:
                 return self.queue[0]
             return None
 
     def next(self):
-        while True:
-            with self.lock:
-                if self.queue:
-                    return self.queue.pop(0)
-
-            time.sleep(0.001)
+        with self.cond:
+            while not self.queue:
+                self.cond.wait()
+            return self.queue.pop(0)
 
 
 class AsyncStream:
