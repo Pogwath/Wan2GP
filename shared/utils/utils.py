@@ -18,6 +18,7 @@ import tempfile
 import time
 from functools import lru_cache
 from .video_decode import probe_video_stream_metadata, video_needs_corrected_decode, decode_video_frames_ffmpeg, get_video_summary_extras
+from shared.math.math_utils import compute_sliding_window_no
 from .virtual_media import get_virtual_image, parse_virtual_media_path, strip_virtual_media_suffix
 os.environ["U2NET_HOME"] = os.path.join(os.getcwd(), "ckpts", "rembg")
 
