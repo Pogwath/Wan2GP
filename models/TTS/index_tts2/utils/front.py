@@ -520,37 +520,54 @@ class TextTokenizer:
         将tokenize后的结果按特定token进一步分割
         """
         # 处理特殊情况
-        if len(tokenized_str) == 0:
+        if not tokenized_str:
             return []
+
+        split_tokens_set = set(split_tokens)
+        comma_in_split = "," in split_tokens_set or "▁," in split_tokens_set
+        dash_in_split = "-" in split_tokens_set
+
         segments: List[List[str]] = []
         current_segment = []
         current_segment_tokens_len = 0
-        for i in range(len(tokenized_str)):
+
+        token_count = len(tokenized_str)
+        i = 0
+        while i < token_count:
             token = tokenized_str[i]
             current_segment.append(token)
             current_segment_tokens_len += 1
-            if not  ("," in split_tokens or "▁," in split_tokens ) and ("," in current_segment or "▁," in current_segment): 
-                # 如果当前tokens中有,，则按,分割
+
+            if not comma_in_split and (token == "," or token == "▁,"):
                 sub_segments = TextTokenizer.split_segments_by_token(
-                    current_segment, [",", "▁,"], max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens
+                    current_segment, [",", "▁,"], max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens=quick_streaming_tokens
                 )
-            elif "-" not in split_tokens and "-" in current_segment:
-                # 没有,，则按-分割
+                segments.extend(sub_segments)
+                current_segment = []
+                current_segment_tokens_len = 0
+                i += 1
+                continue
+
+            if not dash_in_split and token == "-":
                 sub_segments = TextTokenizer.split_segments_by_token(
-                    current_segment, ["-"], max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens
+                    current_segment, ["-"], max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens=quick_streaming_tokens
                 )
-            elif current_segment_tokens_len <= max_text_tokens_per_segment:
-                if token in split_tokens and current_segment_tokens_len > 2:
-                    if i < len(tokenized_str) - 1:
-                        if tokenized_str[i + 1] in ["'", "▁'"]:
-                            # 后续token是'，则不切分
-                            current_segment.append(tokenized_str[i + 1])
+                segments.extend(sub_segments)
+                current_segment = []
+                current_segment_tokens_len = 0
+                i += 1
+                continue
+
+            if current_segment_tokens_len <= max_text_tokens_per_segment:
+                if token in split_tokens_set and current_segment_tokens_len > 2:
+                    if i < token_count - 1:
+                        next_token = tokenized_str[i + 1]
+                        if next_token == "'" or next_token == "▁'":
+                            current_segment.append(next_token)
                             i += 1
                     segments.append(current_segment)
                     current_segment = []
                     current_segment_tokens_len = 0
-                continue
-            # 如果当前tokens的长度超过最大限制
             else:
                 # 按照长度分割
                 sub_segments = []
@@ -565,28 +582,37 @@ class TextTokenizer:
                     "Maybe unexpected behavior",
                     RuntimeWarning,
                 )
-            segments.extend(sub_segments)
-            current_segment = []
-            current_segment_tokens_len = 0
+                segments.extend(sub_segments)
+                current_segment = []
+                current_segment_tokens_len = 0
+
+            i += 1
+
         if current_segment_tokens_len > 0:
-            assert current_segment_tokens_len <= max_text_tokens_per_segment
             segments.append(current_segment)
-        # 如果相邻的句子加起来长度小于最大限制，且此前token总数超过quick_streaming_tokens，则合并
+
+        # 合并
         merged_segments = []
         total_token = 0
         for segment in segments:
-            total_token += len(segment)
-            if len(segment) == 0:
+            seg_len = len(segment)
+            if seg_len == 0:
                 continue
-            if len(merged_segments) == 0:
+            total_token += seg_len
+
+            if not merged_segments:
                 merged_segments.append(segment)
-            elif len(merged_segments[-1]) + len(segment) <= max_text_tokens_per_segment and total_token > quick_streaming_tokens:
-                merged_segments[-1] = merged_segments[-1] + segment
-            # 或小于最大长度限制的一半，则合并
-            elif len(merged_segments[-1]) + len(segment) <= max_text_tokens_per_segment / 2:
-                merged_segments[-1] = merged_segments[-1] + segment
             else:
-                merged_segments.append(segment)
+                last_merged = merged_segments[-1]
+                last_len = len(last_merged)
+
+                if last_len + seg_len <= max_text_tokens_per_segment and total_token > quick_streaming_tokens:
+                    merged_segments[-1] = last_merged + segment
+                elif last_len + seg_len <= max_text_tokens_per_segment / 2:
+                    merged_segments[-1] = last_merged + segment
+                else:
+                    merged_segments.append(segment)
+
         return merged_segments
 
     punctuation_marks_tokens = [

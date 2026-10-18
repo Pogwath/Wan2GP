@@ -2,23 +2,23 @@ import re
 
 from textstat import textstat
 
+_CONTAINS_CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fff0-9]')
+_CHINESE_OR_NUMBER_PATTERN = re.compile(r'[\u4e00-\u9fff0-9]')
+_TOKENS_PATTERN = re.compile(r'[\u4e00-\u9fff]+|[a-zA-Z]+|[0-9]+')
+
 
 def contains_chinese(text):
     # 正则表达式，用于匹配中文字符 + 数字 -> 都认为是 zh
-    if re.search(r'[\u4e00-\u9fff0-9]', text):
-        return True
-    return False
+    return bool(_CONTAINS_CHINESE_PATTERN.search(text))
 
 
 def get_text_syllable_num(text):
-    chinese_char_pattern = re.compile(r'[\u4e00-\u9fff]')
-    number_char_pattern = re.compile(r'[0-9]')
     syllable_num = 0
-    tokens = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+|[0-9]+', text)
+    tokens = _TOKENS_PATTERN.findall(text)
     # print(tokens)
     if contains_chinese(text):
         for token in tokens:
-            if chinese_char_pattern.search(token) or number_char_pattern.search(token):
+            if _CHINESE_OR_NUMBER_PATTERN.search(token):
                 syllable_num += len(token)
             else:
                 syllable_num += textstat.syllable_count(token)
