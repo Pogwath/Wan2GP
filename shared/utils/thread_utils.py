@@ -3,7 +3,7 @@
 import time
 import traceback
 
-from threading import Thread, Lock
+from threading import Thread, Lock, Condition
 
 
 class _TaskRunner:
@@ -12,18 +12,20 @@ class _TaskRunner:
         self.thread_name = self.runner_name.replace("_", " ").strip().title() or "Default"
         self.task_queue = []
         self.lock = Lock()
+        self.condition = Condition(self.lock)
         self.thread = None
 
     def _process_tasks(self):
+        """
+        Processes tasks from the queue.
+        Optimized to use Condition variables instead of busy-waiting (time.sleep(0.001)).
+        This drops idle CPU usage of background threads to zero.
+        """
         while True:
-            task = None
             with self.lock:
-                if self.task_queue:
-                    task = self.task_queue.pop(0)
-                    
-            if task is None:
-                time.sleep(0.001)
-                continue
+                while not self.task_queue:
+                    self.condition.wait()
+                task = self.task_queue.pop(0)
                 
             func, args, kwargs, thread_name = task
             current_name = None
@@ -45,6 +47,7 @@ class _TaskRunner:
     def add_task(self, func, *args, thread_name=None, **kwargs):
         with self.lock:
             self.task_queue.append((func, args, kwargs, thread_name))
+            self.condition.notify()
             thread = None if self.thread is not None else Thread(target=self._process_tasks, daemon=True, name=self.thread_name)
             if thread is not None:
                 self.thread = thread
@@ -84,10 +87,12 @@ class FIFOQueue:
     def __init__(self):
         self.queue = []
         self.lock = Lock()
+        self.condition = Condition(self.lock)
 
     def push(self, cmd, data = None):
         with self.lock:
             self.queue.append( (cmd, data) )
+            self.condition.notify()
 
     def pop(self):
         with self.lock:
@@ -102,12 +107,14 @@ class FIFOQueue:
             return None
 
     def next(self):
-        while True:
-            with self.lock:
-                if self.queue:
-                    return self.queue.pop(0)
-
-            time.sleep(0.001)
+        """
+        Waits for the next item in the queue.
+        Optimized to use Condition variables instead of busy-waiting.
+        """
+        with self.lock:
+            while not self.queue:
+                self.condition.wait()
+            return self.queue.pop(0)
 
 
 class AsyncStream:
