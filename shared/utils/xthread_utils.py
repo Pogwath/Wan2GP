@@ -3,24 +3,29 @@
 import time
 import traceback
 
-from threading import Thread, Lock
+from threading import Thread, Lock, Condition
 
 
 class Listener:
     task_queue = []
     lock = Lock()
+    condition = Condition(lock)
     thread = None
     
     @classmethod
     def _process_tasks(cls):
+        """
+        ⚡ Bolt Optimization: Uses Condition variable instead of time.sleep(0.001)
+        Reduces idle CPU usage to 0% by eliminating busy-waiting.
+        """
         while True:
             task = None
             with cls.lock:
-                if cls.task_queue:
-                    task = cls.task_queue.pop(0)
+                while not cls.task_queue:
+                    cls.condition.wait()
+                task = cls.task_queue.pop(0)
                     
             if task is None:
-                time.sleep(0.001)
                 continue
                 
             func, args, kwargs = task
@@ -36,6 +41,7 @@ class Listener:
     def add_task(cls, func, *args, **kwargs):
         with cls.lock:
             cls.task_queue.append((func, args, kwargs))
+            cls.condition.notify()
 
         if cls.thread is None:
             cls.thread = Thread(target=cls._process_tasks, daemon=True)
@@ -50,10 +56,12 @@ class FIFOQueue:
     def __init__(self):
         self.queue = []
         self.lock = Lock()
+        self.condition = Condition(self.lock)
 
     def push(self, cmd, data = None):
         with self.lock:
             self.queue.append( (cmd, data) )
+            self.condition.notify()
 
     def pop(self):
         with self.lock:
@@ -68,12 +76,14 @@ class FIFOQueue:
             return None
 
     def next(self):
-        while True:
-            with self.lock:
-                if self.queue:
-                    return self.queue.pop(0)
-
-            time.sleep(0.001)
+        """
+        ⚡ Bolt Optimization: Wait on condition instead of busy-wait.
+        Reduces CPU time significantly during wait loops.
+        """
+        with self.lock:
+            while not self.queue:
+                self.condition.wait()
+            return self.queue.pop(0)
 
 
 class AsyncStream:
