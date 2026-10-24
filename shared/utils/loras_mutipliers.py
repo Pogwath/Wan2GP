@@ -240,8 +240,8 @@ def _replace_tokens(text: str, repl: Dict[int, str]) -> str:
 def _drop_tokens_by_indices(text: str, idxs: List[int]) -> str:
     if not idxs: return text
     out = text
+    sp = _spans(out)
     for idx in sorted(set(idxs), reverse=True):
-        sp = _spans(out)  # recompute spans after each deletion
         if 0 <= idx < len(sp):
             st, en = sp[idx]
             out = _erase_span_and_one_sep(out, st, en)
