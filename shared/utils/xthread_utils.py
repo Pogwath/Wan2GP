@@ -2,26 +2,28 @@
 
 import time
 import traceback
+from collections import deque
 
-from threading import Thread, Lock
+from threading import Thread, Lock, Condition
 
 
 class Listener:
-    task_queue = []
+    task_queue = deque()
     lock = Lock()
+    cond = Condition(lock)
     thread = None
     
     @classmethod
     def _process_tasks(cls):
         while True:
             task = None
-            with cls.lock:
-                if cls.task_queue:
-                    task = cls.task_queue.pop(0)
-                    
-            if task is None:
-                time.sleep(0.001)
-                continue
+            # ⚡ Bolt Optimization: Use condition variables (wait/notify) instead of polling
+            # with time.sleep() to reduce background idle CPU usage to ~0%.
+            with cls.cond:
+                while not cls.task_queue:
+                    cls.cond.wait()
+                # ⚡ Bolt Optimization: Use collections.deque for O(1) popleft() instead of list pop(0)
+                task = cls.task_queue.popleft()
                 
             func, args, kwargs = task
             try:
@@ -34,8 +36,9 @@ class Listener:
     
     @classmethod
     def add_task(cls, func, *args, **kwargs):
-        with cls.lock:
+        with cls.cond:
             cls.task_queue.append((func, args, kwargs))
+            cls.cond.notify()
 
         if cls.thread is None:
             cls.thread = Thread(target=cls._process_tasks, daemon=True)
@@ -48,32 +51,34 @@ def async_run(func, *args, **kwargs):
 
 class FIFOQueue:
     def __init__(self):
-        self.queue = []
+        self.queue = deque()
         self.lock = Lock()
+        self.cond = Condition(self.lock)
 
     def push(self, cmd, data = None):
-        with self.lock:
+        with self.cond:
             self.queue.append( (cmd, data) )
+            self.cond.notify()
 
     def pop(self):
-        with self.lock:
+        with self.cond:
             if self.queue:
-                return self.queue.pop(0)
+                # ⚡ Bolt Optimization: Use collections.deque for O(1) popleft() instead of list pop(0)
+                return self.queue.popleft()
             return None
 
     def top(self):
-        with self.lock:
+        with self.cond:
             if self.queue:
                 return self.queue[0]
             return None
 
     def next(self):
-        while True:
-            with self.lock:
-                if self.queue:
-                    return self.queue.pop(0)
-
-            time.sleep(0.001)
+        with self.cond:
+            while not self.queue:
+                self.cond.wait()
+            # ⚡ Bolt Optimization: Use collections.deque for O(1) popleft() instead of list pop(0)
+            return self.queue.popleft()
 
 
 class AsyncStream:
