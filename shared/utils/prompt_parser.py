@@ -147,8 +147,8 @@ def process_template(input_text, keep_comments=False, keep_empty_lines=False):
                 error_message = f"Unclosed double quotes\nLine: '{orig_line}'"
                 return "", error_message
             
-            # Split by optional colon separator
-            var_sections = re.split(r'\s*:\s*', macro_line)
+            # ⚡ Bolt: Replace regex split and search with faster native string operations
+            var_sections = macro_line.split(':')
             
             for section in var_sections:
                 section = section.strip()
@@ -156,26 +156,29 @@ def process_template(input_text, keep_comments=False, keep_empty_lines=False):
                     continue
                     
                 # Extract variable name
-                var_match = re.search(r'\{([^}]+)\}', section)
-                if not var_match:
+                start_brace = section.find('{')
+                end_brace = section.find('}', start_brace + 1)
+
+                if start_brace != -1 and end_brace != -1:
+                    var_name = section[start_brace+1:end_brace].strip()
+                else:
+                    var_name = None
+
+                if not var_name:
                     if '{' in section or '}' in section:
                         error_message = f"Malformed variable declaration\nLine: '{orig_line}'"
                         return "", error_message
                     continue
-                    
-                var_name = var_match.group(1).strip()
-                if not var_name:
-                    error_message = f"Empty variable name\nLine: '{orig_line}'"
-                    return "", error_message
                 
                 # Check variable value format
-                value_part = section[section.find('}')+1:].strip()
+                value_part = section[end_brace+1:].strip()
                 if not value_part.startswith('='):
                     error_message = f"Missing '=' after variable '{{{var_name}}}'\nLine: '{orig_line}'"
                     return "", error_message
                 
                 # Extract all quoted values
-                var_values = re.findall(r'"([^"]*)"', value_part)
+                parts = value_part.split('"')
+                var_values = parts[1::2] if len(parts) >= 3 else []
                 
                 # Check if there are values specified
                 if not var_values:
@@ -183,8 +186,13 @@ def process_template(input_text, keep_comments=False, keep_empty_lines=False):
                     return "", error_message
                 
                 # Check for missing commas between values
-                # Look for patterns like "value""value" (missing comma)
-                if re.search(r'"[^,]*"[^,]*"', value_part):
+                missing_comma = False
+                if len(parts) >= 5:
+                    for i in range(2, len(parts) - 2, 2):
+                        if ',' not in parts[i]:
+                            missing_comma = True
+                            break
+                if missing_comma:
                     error_message = f"Missing comma between values for variable '{{{var_name}}}'\nLine: '{orig_line}'"
                     return "", error_message
                 
@@ -195,7 +203,9 @@ def process_template(input_text, keep_comments=False, keep_empty_lines=False):
         else:
             if not line.startswith('#'):
                 # Check for unknown variables in template line
-                var_references = re.findall(r'\{([^}]+)\}', line)
+                parts = line.split('{')
+                var_references = [p.split('}')[0] for p in parts[1:] if '}' in p]
+
                 for var_ref in var_references:
                     if var_ref not in current_variables:
                         error_message = f"Unknown variable '{{{var_ref}}}' in template\nLine: '{orig_line}'"
@@ -270,8 +280,8 @@ def extract_variable_names(macro_line):
     if open_braces != close_braces:
         return [], f"Unmatched braces: {open_braces} opening '{{' and {close_braces} closing '}}' braces"
     
-    # Split by optional colon separator
-    var_sections = re.split(r'\s*:\s*', macro_line)
+    # ⚡ Bolt: Replace regex split and findall with faster native string operations
+    var_sections = macro_line.split(':')
     
     for section in var_sections:
         section = section.strip()
@@ -279,7 +289,9 @@ def extract_variable_names(macro_line):
             continue
             
         # Extract variable name
-        var_matches = re.findall(r'\{([^}]+)\}', section)
+        parts = section.split('{')
+        var_matches = [p.split('}')[0] for p in parts[1:] if '}' in p]
+
         for var_name in var_matches:
             new_var = var_name.strip()
             if not new_var in variable_names: 
@@ -315,8 +327,8 @@ def extract_variable_values(macro_line):
     if macro_line.count('"') % 2 != 0:
         return {}, "Unclosed double quotes"
     
-    # Split by optional colon separator
-    var_sections = re.split(r'\s*:\s*', macro_line)
+    # ⚡ Bolt: Replace regex operations with native string operations
+    var_sections = macro_line.split(':')
     
     for section in var_sections:
         section = section.strip()
@@ -324,30 +336,40 @@ def extract_variable_values(macro_line):
             continue
             
         # Extract variable name
-        var_match = re.search(r'\{([^}]+)\}', section)
-        if not var_match:
+        start_brace = section.find('{')
+        end_brace = section.find('}', start_brace + 1)
+
+        if start_brace != -1 and end_brace != -1:
+            var_name = section[start_brace+1:end_brace].strip()
+        else:
+            var_name = None
+
+        if not var_name:
             if '{' in section or '}' in section:
                 return {}, "Malformed variable declaration"
             continue
-            
-        var_name = var_match.group(1).strip()
-        if not var_name:
-            return {}, "Empty variable name"
         
         # Check variable value format
-        value_part = section[section.find('}')+1:].strip()
+        value_part = section[end_brace+1:].strip()
         if not value_part.startswith('='):
             return {}, f"Missing '=' after variable '{{{var_name}}}'"
         
         # Extract all quoted values
-        var_values = re.findall(r'"([^"]*)"', value_part)
+        parts = value_part.split('"')
+        var_values = parts[1::2] if len(parts) >= 3 else []
         
         # Check if there are values specified
         if not var_values:
             return {}, f"No quoted values found for variable '{{{var_name}}}'"
         
         # Check for missing commas between values
-        if re.search(r'"[^,]*"[^,]*"', value_part):
+        missing_comma = False
+        if len(parts) >= 5:
+            for i in range(2, len(parts) - 2, 2):
+                if ',' not in parts[i]:
+                    missing_comma = True
+                    break
+        if missing_comma:
             return {}, f"Missing comma between values for variable '{{{var_name}}}'"
         
         variables[var_name] = var_values
